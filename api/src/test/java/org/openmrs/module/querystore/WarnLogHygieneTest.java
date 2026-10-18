@@ -37,6 +37,8 @@ public class WarnLogHygieneTest {
 
 	private static final Pattern WARN_OR_ERROR_STATEMENT = Pattern.compile("log\\.(warn|error)\\((.*?)\\);", Pattern.DOTALL);
 
+	private static final Pattern SAFELOG_CALL = Pattern.compile("SafeLog\\.(warn|error)\\((.*?)\\);", Pattern.DOTALL);
+
 	private static final Pattern CATCH_PARAMETER = Pattern.compile("catch\\s*\\([^)]*?\\b(\\w+)\\s*\\)");
 
 	private static final Pattern IDENTIFYING_VARIABLE = Pattern.compile("(?i)\\b\\w*(patient|encounter)uuid\\w*\\b");
@@ -97,6 +99,48 @@ public class WarnLogHygieneTest {
 		}
 		assertTrue("the scan found no WARN or ERROR statements, so it isn't scanning anything", scanned > 20);
 		assertEquals("WARN/ERROR statements that carry a raw exception; use SafeLog", new ArrayList<String>(), offenders);
+	}
+
+	/**
+	 * SafeLog scrubs uuids from its message at runtime; this keeps the call sites honest too, so a
+	 * patient or encounter uuid, or an exception's raw text, is not handed to it in the first place.
+	 * The message is every argument between the owner class and the throwable.
+	 */
+	@Test
+	public void noSafeLogMessageCarriesAPatientOrEncounterUuidOrARawException() throws IOException {
+		List<String> offenders = new ArrayList<>();
+		int scanned = 0;
+		for (Path file : sourceFiles()) {
+			String source = new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
+			List<String> catchParameters = new ArrayList<>();
+			Matcher c = CATCH_PARAMETER.matcher(source);
+			while (c.find()) {
+				catchParameters.add(c.group(1));
+			}
+			Matcher call = SAFELOG_CALL.matcher(source);
+			while (call.find()) {
+				scanned++;
+				String args = call.group(2);
+				int first = args.indexOf(',');
+				int last = args.lastIndexOf(',');
+				String message = first >= 0 && last > first ? args.substring(first + 1, last) : "";
+				boolean splices = false;
+				for (String parameter : catchParameters) {
+					if (Pattern.compile("\\+\\s*" + parameter + "\\b(?!\\s*\\.)|\\b" + parameter + "\\.toString\\(")
+					        .matcher(message).find()) {
+						splices = true;
+					}
+				}
+				boolean rawMessage = message.contains("getMessage()") && !message.contains("scrubUuids(")
+				        && !message.contains("SkipLogFormat.format(");
+				if (IDENTIFYING_VARIABLE.matcher(message).find() || splices || rawMessage) {
+					offenders.add(file.getFileName() + ": SafeLog." + call.group(1) + "(" + args.replaceAll("\\s+", " ") + ")");
+				}
+			}
+		}
+		assertTrue("the scan found no SafeLog calls, so it isn't scanning anything", scanned > 20);
+		assertEquals("SafeLog messages that carry a patient or encounter uuid or an exception's raw text",
+		    new ArrayList<String>(), offenders);
 	}
 
 	/** Every main source file in api and omod; fails if none is found, so a clean scan means something. */

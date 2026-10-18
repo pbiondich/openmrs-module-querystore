@@ -12,6 +12,8 @@ package org.openmrs.module.querystore.events;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.openmrs.BaseOpenmrsData;
 import org.openmrs.Obs;
 import org.openmrs.Person;
@@ -66,6 +68,8 @@ import org.springframework.context.event.EventListener;
  * cheaply by the {@code instanceof BaseOpenmrsData} check and the serializer lookup returning null.
  */
 public class CoreServiceEventListener {
+
+	private static final Log log = LogFactory.getLog(CoreServiceEventListener.class);
 
 	@EventListener
 	public void onSave(SaveServiceEvent<?> event) {
@@ -197,7 +201,8 @@ public class CoreServiceEventListener {
 					}
 				}
 				catch (RuntimeException e) {
-					SafeLog.warn(CoreServiceEventListener.class, "Skipping reconcile for obs/" + uuid + " due to failure", e);
+					SafeLog.warn(CoreServiceEventListener.class, "Skipping reconcile for an obs due to failure (obs uuid at DEBUG)", e);
+					log.debug("Skipping reconcile for obs/" + uuid);
 				}
 			}
 		});
