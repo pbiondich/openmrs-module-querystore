@@ -96,6 +96,13 @@ public class WarnLogHygieneTest {
 				String args = statement.group(2);
 				String last = args.contains(",") ? args.substring(args.lastIndexOf(',') + 1).trim() : "";
 				boolean passesException = catchParameters.contains(last);
+				for (String parameter : catchParameters) {
+					// Spliced into the text: "..." + e, or e.toString(), carries the raw message.
+					if (Pattern.compile("\\+\\s*" + parameter + "\\b(?!\\s*\\.)|\\b" + parameter + "\\.toString\\(")
+					        .matcher(args).find()) {
+						passesException = true;
+					}
+				}
 				boolean splicesRawMessage = args.contains("getMessage()") && !args.contains("scrubUuids(")
 				        && !args.contains("SkipLogFormat.format(");
 				if (passesException || splicesRawMessage) {

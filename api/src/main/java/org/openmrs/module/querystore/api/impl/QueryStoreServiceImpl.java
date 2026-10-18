@@ -316,8 +316,8 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 			} else {
 				bootstrapService().ensureIndexed(patientUuid);
 			}
-			// A real patient always projects at least its patient document, so nothing indexed means
-			// the projection failed (or the uuid is no patient's).
+			// A live patient always projects at least its patient document, so nothing indexed means
+			// the projection failed (or the uuid is no live patient's).
 			if (!backend.existsByPatient(patientUuid)) {
 				throw new IllegalStateException("Warm finished with nothing indexed");
 			}

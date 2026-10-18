@@ -68,6 +68,9 @@ public class QueryStoreRestControllerTest {
 		PatientService patients = mock(PatientService.class);
 		when(patients.getPatientByUuid(org.mockito.ArgumentMatchers.anyString())).thenReturn(new Patient());
 		when(patients.getPatientByUuid(UNKNOWN_PATIENT)).thenReturn(null);
+		Patient voided = new Patient();
+		voided.setVoided(true);
+		when(patients.getPatientByUuid(VOIDED_PATIENT)).thenReturn(voided);
 		controller.setPatientService(patients);
 		BootstrapService bootstrap = mock(BootstrapService.class);
 		when(bootstrap.getResourceTypeNames()).thenReturn(Arrays.asList("obs", "condition"));
@@ -75,6 +78,9 @@ public class QueryStoreRestControllerTest {
 	}
 
 	private static final String UNKNOWN_PATIENT = "no-such-patient";
+
+	/** Core's getPatientByUuid returns voided patients too. */
+	private static final String VOIDED_PATIENT = "voided-patient";
 
 	@After
 	public void clearContext() {
@@ -539,7 +545,7 @@ public class QueryStoreRestControllerTest {
 	}
 
 	@Test
-	public void patientEndpoints_return404ForAUuidCoreDoesNotReturn_withoutTouchingTheService() {
+	public void patientEndpoints_return404ForAnUnknownOrVoidedPatient_withoutTouchingTheService() {
 		authenticate();
 		QueryStoreService queryStore = mock(QueryStoreService.class);
 		controller.setQueryStoreService(queryStore);
@@ -548,7 +554,9 @@ public class QueryStoreRestControllerTest {
 		        () -> controller.warm(UNKNOWN_PATIENT),
 		        () -> controller.status(UNKNOWN_PATIENT),
 		        () -> controller.recent(UNKNOWN_PATIENT, null, null, false),
-		        () -> controller.search(UNKNOWN_PATIENT, "cd4", null, null, null, null, null, null, null, true) };
+		        () -> controller.search(UNKNOWN_PATIENT, "cd4", null, null, null, null, null, null, null, true),
+		        () -> controller.warm(VOIDED_PATIENT),
+		        () -> controller.search(VOIDED_PATIENT, "cd4", null, null, null, null, null, null, null, true) };
 		for (Runnable call : calls) {
 			try {
 				call.run();

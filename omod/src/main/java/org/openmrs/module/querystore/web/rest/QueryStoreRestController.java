@@ -16,6 +16,7 @@ import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
 import org.openmrs.api.APIAuthenticationException;
+import org.openmrs.Patient;
 import org.openmrs.api.APIException;
 import org.openmrs.api.PatientService;
 import org.openmrs.api.context.Context;
@@ -319,14 +320,17 @@ public class QueryStoreRestController {
 	}
 
 	/**
-	 * 404 unless core shows this caller the patient. The lookup goes through core's own patient read,
+	 * 404 unless core shows this caller the patient, and it is not voided. The lookup goes through core's own patient read,
 	 * so whatever patient-level restriction a deployment applies there applies here too (ADR Decision
 	 * 14 leaves querystore's own checks at the privilege), and a uuid that is no patient's never
 	 * reaches the warm machinery, whose per-patient bookkeeping would otherwise grow with every uuid a
 	 * caller tries. A 404 tells the caller no more than core's {@code GET /patient/{uuid}} does.
 	 */
 	private void requirePatient(String patientUuid) {
-		if (patientService().getPatientByUuid(patientUuid) == null) {
+		// getPatientByUuid returns voided patients too; a voided patient has no read-store presence
+		// (ADR Decision 10), so its warm could only ever fail.
+		Patient patient = patientService().getPatientByUuid(patientUuid);
+		if (patient == null || Boolean.TRUE.equals(patient.getVoided())) {
 			throw new PatientNotFoundException();
 		}
 	}
