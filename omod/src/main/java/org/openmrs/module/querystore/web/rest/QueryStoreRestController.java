@@ -67,6 +67,7 @@ import org.springframework.web.bind.annotation.ResponseBody;
  *   -&gt; 202 {"accepted": true}   (then poll indexingstatus)
  *
  * POST /ws/rest/v1/querystore/patient/{uuid}/warm     -&gt; 202 {"status": "projecting"}
+ *   (200 when already indexed; 503 with Retry-After when no projection slot is free)
  * GET  /ws/rest/v1/querystore/patient/{uuid}/status   -&gt; {"status": "indexed"}
  *   (status is one of indexed, projecting, failed, not_indexed; a uuid that is no live patient's is a 404)
  * GET  /ws/rest/v1/querystore/patient/{uuid}/recent?limit=5&amp;types=obs

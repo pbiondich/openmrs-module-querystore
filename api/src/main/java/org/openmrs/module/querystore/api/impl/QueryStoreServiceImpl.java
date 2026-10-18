@@ -88,7 +88,7 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 	public static final int DEFAULT_CANDIDATE_POOL = 200;
 
 	/** Default for {@code querystore.projection.syncWaitSeconds}. */
-	public static final int DEFAULT_SYNC_PROJECTION_WAIT_SECONDS = 30;
+	public static final int DEFAULT_SYNC_PROJECTION_WAIT_SECONDS = 10;
 
 	// Candidate pool for query(): its service-layer collapse, recency sort, facets and paging all run
 	// over this many backend hits. Set from querystore.query.candidatePool at module start.

@@ -87,9 +87,11 @@
 
     <globalProperty>
         <property>querystore.projection.syncWaitSeconds</property>
-        <defaultValue>30</defaultValue>
+        <defaultValue>10</defaultValue>
         <description>How long a search on a never-indexed patient waits for a projection slot before
-            answering with whatever is indexed. Read at module start.</description>
+            answering with whatever is indexed. The waiting request holds its server thread, so a
+            burst of cold-patient searches parks up to this many seconds per surplus request; longer
+            waits find a slot more often, shorter ones free threads sooner. Read at module start.</description>
     </globalProperty>
 
     <globalProperty>
