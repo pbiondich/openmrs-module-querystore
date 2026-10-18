@@ -181,4 +181,42 @@ public class BootstrapLauncherTest {
 		assertTrue(launcher.launchResyncAsync("obs"));
 		assertEquals("re-sync does not collapse overlapping requests (unlike launchAsync)", 2, launches[0]);
 	}
+
+	@Test
+	public void launchEnsureIndexedAsync_collapsesRepeatsPerPatient_andReportsWarmingUntilTheTaskEnds() {
+		BootstrapLauncher launcher = new BootstrapLauncher();
+		final java.util.List<Runnable> tasks = new java.util.ArrayList<>();
+		launcher.setDaemonExecutor((task, token) -> tasks.add(task));
+		launcher.setDaemonToken(new DaemonToken("token-warm"));
+
+		assertTrue(launcher.launchEnsureIndexedAsync("patient-1"));
+		assertTrue("a repeat for the same patient reports success", launcher.launchEnsureIndexedAsync("patient-1"));
+		assertEquals("but hands off only one projection", 1, tasks.size());
+		assertTrue(launcher.isWarming("patient-1"));
+		assertFalse(launcher.isWarming("patient-2"));
+
+		// No OpenMRS context here, so the task's service lookup throws; the task must still release
+		// the patient, else every later warm for it would be swallowed as a duplicate.
+		tasks.get(0).run();
+		assertFalse(launcher.isWarming("patient-1"));
+		assertTrue(launcher.launchEnsureIndexedAsync("patient-1"));
+		assertEquals(2, tasks.size());
+	}
+
+	@Test
+	public void launchEnsureIndexedAsync_refusesBeyondTheConcurrencyCap_andWithoutAToken() {
+		BootstrapLauncher launcher = new BootstrapLauncher();
+		final int[] launches = { 0 };
+		launcher.setDaemonExecutor((task, token) -> launches[0]++);
+
+		assertFalse("no token, no warm", launcher.launchEnsureIndexedAsync("patient-0"));
+
+		launcher.setDaemonToken(new DaemonToken("token-warm-cap"));
+		for (int i = 1; i <= BootstrapLauncher.MAX_CONCURRENT_PATIENT_WARMS; i++) {
+			assertTrue(launcher.launchEnsureIndexedAsync("patient-" + i));
+		}
+		assertFalse("one past the cap is refused", launcher.launchEnsureIndexedAsync("patient-x"));
+		assertFalse(launcher.isWarming("patient-x"));
+		assertEquals(BootstrapLauncher.MAX_CONCURRENT_PATIENT_WARMS, launches[0]);
+	}
 }

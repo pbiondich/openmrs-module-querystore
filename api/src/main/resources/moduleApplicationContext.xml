@@ -91,6 +91,7 @@
             ServiceContext.getService() blocks while refresh is still in progress (issue #10).
         -->
         <property name="embeddingProvider" ref="querystore.embedding.dispatcher"/>
+        <property name="bootstrapLauncher" ref="querystore.bootstrap.launcher"/>
     </bean>
 
     <bean id="querystore.bootstrap.progressDao"

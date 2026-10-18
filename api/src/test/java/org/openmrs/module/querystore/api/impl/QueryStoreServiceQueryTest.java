@@ -1,0 +1,545 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public License,
+ * v. 2.0. If a copy of the MPL was not distributed with this file, You can
+ * obtain one at http://mozilla.org/MPL/2.0/. OpenMRS is also distributed under
+ * the terms of the Healthcare Disclaimer located at http://openmrs.org/license.
+ *
+ * Copyright (C) OpenMRS Inc. OpenMRS is a registered trademark and the OpenMRS
+ * graphic logo is a trademark of OpenMRS Inc.
+ */
+package org.openmrs.module.querystore.api.impl;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+import static org.openmrs.module.querystore.QueryStoreConstants.FIELD_CONCEPT_NAME;
+import static org.openmrs.module.querystore.QueryStoreConstants.FIELD_CONCEPT_UUID;
+import static org.openmrs.module.querystore.QueryStoreConstants.FIELD_VALUE_NUMERIC;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import org.openmrs.module.querystore.api.IndexStatus;
+import org.openmrs.module.querystore.api.QueryResult;
+import org.openmrs.module.querystore.api.QuerySpec;
+import org.openmrs.module.querystore.backend.SchemaSpec;
+import org.openmrs.module.querystore.backend.lucene.LuceneBackendStore;
+import org.openmrs.module.querystore.bootstrap.BootstrapLauncher;
+import org.openmrs.module.querystore.bootstrap.BootstrapProgress;
+import org.openmrs.module.querystore.bootstrap.BootstrapService;
+import org.openmrs.module.querystore.bootstrap.DriftReport;
+import org.openmrs.module.querystore.embedding.EmbeddingProvider;
+import org.openmrs.module.querystore.model.QueryDocument;
+
+/**
+ * {@link QueryStoreServiceImpl#query(QuerySpec)} against the embedded Lucene backend, so mode, type
+ * filtering, sort, collapse, facets and paging run over real BM25 and kNN results and real metadata
+ * round-trips rather than a fake's canned hits.
+ */
+public class QueryStoreServiceQueryTest {
+
+	private static final String PATIENT = "patient-A";
+
+	private static final String CD4 = "concept-cd4";
+
+	private static final String MALARIA = "concept-malaria";
+
+	private Path indexRoot;
+
+	private LuceneBackendStore backend;
+
+	private QueryStoreServiceImpl service;
+
+	private CountingEmbeddingProvider embedder;
+
+	private FakeLauncher launcher;
+
+	private RecordingBootstrapService bootstrap;
+
+	@Before
+	public void setUp() throws IOException {
+		indexRoot = Files.createTempDirectory("querystore-query-test-");
+		backend = new LuceneBackendStore(indexRoot);
+		for (String type : Arrays.asList("obs", "condition", "encounter")) {
+			backend.ensureSchema(type, SchemaSpec.builder(4).build());
+		}
+		embedder = new CountingEmbeddingProvider();
+		launcher = new FakeLauncher();
+		bootstrap = new RecordingBootstrapService();
+		service = new QueryStoreServiceImpl();
+		service.setBackend(backend);
+		service.setEmbeddingProvider(embedder);
+		service.setBootstrapLauncher(launcher);
+		service.setBootstrapServiceOverride(bootstrap);
+	}
+
+	@After
+	public void tearDown() throws IOException {
+		backend.close();
+		try (Stream<Path> paths = Files.walk(indexRoot)) {
+			for (Path p : paths.sorted(Comparator.reverseOrder()).collect(Collectors.toList())) {
+				Files.deleteIfExists(p);
+			}
+		}
+	}
+
+	// ---------- mode ----------
+
+	@Test
+	public void keywordMode_neverEncodesTheQuery() {
+		index(obs("cd4-1", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-03-12"));
+
+		QueryResult result = service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD).build());
+
+		assertEquals(1, result.getHits().size());
+		assertEquals("keyword mode must not run the query encoder", 0, embedder.embedQueryCount.get());
+	}
+
+	@Test
+	public void hybridMode_encodesTheQueryAndFindsVectorOnlyMatches() {
+		// The encoder maps every text to the same vector, so kNN returns the weight obs although BM25
+		// can't match "cd4" against it: a hit only hybrid mode can produce.
+		index(obs("cd4-1", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-03-12"));
+		index(obs("weight-1", "concept-weight", "Weight: 61.0 kg", 61.0, "2026-03-12"));
+
+		QueryResult keyword = service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD).build());
+		QueryResult hybrid = service.query(spec("cd4").mode(QuerySpec.Mode.HYBRID).build());
+
+		assertEquals(1, keyword.getHits().size());
+		assertEquals(2, hybrid.getHits().size());
+		assertEquals(1, embedder.embedQueryCount.get());
+	}
+
+	// ---------- types ----------
+
+	@Test
+	public void types_restrictTheSearchToThoseResourceTypes() {
+		index(obs("obs-1", MALARIA, "Diagnosis: Malaria", null, "2026-01-01"));
+		index(doc("condition", "cond-1", MALARIA, "Condition: Malaria, active", "2026-01-02"));
+
+		QueryResult all = service.query(spec("malaria").mode(QuerySpec.Mode.KEYWORD).build());
+		QueryResult conditions = service.query(spec("malaria").mode(QuerySpec.Mode.KEYWORD)
+		        .types(Collections.singletonList("condition")).build());
+
+		assertEquals(2, all.getHits().size());
+		assertEquals(1, conditions.getHits().size());
+		assertEquals("condition", conditions.getHits().get(0).getDocument().getResourceType());
+	}
+
+	// ---------- sort ----------
+
+	@Test
+	public void recentSort_ordersHitsNewestFirst() {
+		index(obs("g-old", "concept-glucose", "Fasting blood glucose: 5.1 mmol/L", 5.1, "2025-01-01"));
+		index(obs("g-new", "concept-glucose", "Fasting blood glucose: 7.9 mmol/L", 7.9, "2026-06-01"));
+		index(obs("g-mid", "concept-glucose", "Fasting blood glucose: 6.4 mmol/L", 6.4, "2025-09-01"));
+
+		QueryResult result = service.query(spec("glucose").mode(QuerySpec.Mode.KEYWORD)
+		        .sort(QuerySpec.Sort.RECENT).build());
+
+		assertEquals(Arrays.asList("g-new", "g-mid", "g-old"), uuids(result.getHits()));
+	}
+
+	@Test
+	public void recencyBrowse_withoutQueryText_returnsNewestDocumentsOfTheGivenTypes() {
+		index(obs("o-1", CD4, "CD4 count: 300.0 cells/µL", 300.0, "2025-01-01"));
+		index(obs("o-2", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-01-01"));
+		index(doc("condition", "c-1", MALARIA, "Condition: Malaria, active", "2026-02-01"));
+
+		QueryResult result = service.query(QuerySpec.forPatient(PATIENT).sort(QuerySpec.Sort.RECENT).limit(2).build());
+		QueryResult obsOnly = service.query(QuerySpec.forPatient(PATIENT).sort(QuerySpec.Sort.RECENT)
+		        .types(Collections.singletonList("obs")).limit(5).build());
+
+		assertEquals(Arrays.asList("c-1", "o-2"), uuids(result.getHits()));
+		assertEquals(Arrays.asList("o-2", "o-1"), uuids(obsOnly.getHits()));
+		assertEquals("a browse never encodes anything", 0, embedder.embedQueryCount.get());
+	}
+
+	// ---------- collapse ----------
+
+	@Test
+	public void collapseByConcept_returnsOneGroupPerConceptWithLatestCountAndRecentValues() {
+		for (int month = 1; month <= 7; month++) {
+			index(obs("cd4-" + month, CD4, "CD4 count: " + (300 + month) + ".0 cells/µL", 300.0 + month,
+			    "2026-0" + month + "-15"));
+		}
+
+		QueryResult result = service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD)
+		        .collapse(QuerySpec.Collapse.CONCEPT).build());
+
+		assertTrue("a collapsed result has no flat hits", result.getHits().isEmpty());
+		assertEquals(1, result.getGroups().size());
+		QueryResult.ConceptGroup group = result.getGroups().get(0);
+		assertEquals(CD4, group.getConceptUuid());
+		assertEquals("CD4 count", group.getConceptName());
+		assertEquals(7, group.getCount());
+		assertEquals("cd4-7", group.getLatest().getDocument().getResourceUuid());
+		assertEquals("five newest values, newest first", Arrays.asList("cd4-7", "cd4-6", "cd4-5", "cd4-4", "cd4-3"),
+		    group.getRecent().stream().map(QueryDocument::getResourceUuid).collect(Collectors.toList()));
+		assertTrue(group.getScore() != null && group.getScore() > 0);
+	}
+
+	@Test
+	public void collapseByConcept_takesLatestAndCountFromTheWholeChart_notJustTheMatches() {
+		// The newest CD4's text doesn't contain "count", so it can't match the query, but the row must
+		// still show it as the latest value.
+		index(obs("cd4-old", CD4, "CD4 count: 300.0 cells/µL", 300.0, "2025-01-01"));
+		index(obs("cd4-new", CD4, "CD4: 410.0 cells/µL", 410.0, "2026-05-01"));
+
+		QueryResult result = service.query(spec("count").mode(QuerySpec.Mode.KEYWORD)
+		        .collapse(QuerySpec.Collapse.CONCEPT).build());
+
+		QueryResult.ConceptGroup group = result.getGroups().get(0);
+		assertEquals("cd4-new", group.getLatest().getDocument().getResourceUuid());
+		assertEquals(2, group.getCount());
+		assertNull("the latest wasn't a match, so it carries no score of its own", group.getLatest().getScore());
+	}
+
+	@Test
+	public void collapseByConcept_breaksASameDayTieByWhenTheRecordWasEntered() {
+		// Two CD4s on the same visit date: record_date is a day, so it ties. The one entered later is
+		// the latest, though resource_type/uuid order (the chart's own tie-break) would pick the other.
+		QueryDocument enteredFirst = obs("cd4-a", CD4, "CD4 count: 349.0 cells/µL", 349.0, "2006-03-29");
+		enteredFirst.setLastModified(java.time.Instant.parse("2006-04-04T10:00:00Z"));
+		QueryDocument enteredLater = obs("cd4-z", CD4, "CD4 count: 431.0 cells/µL", 431.0, "2006-03-29");
+		enteredLater.setLastModified(java.time.Instant.parse("2006-05-04T10:00:00Z"));
+		index(enteredFirst);
+		index(enteredLater);
+
+		QueryResult.ConceptGroup group = service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD)
+		        .collapse(QuerySpec.Collapse.CONCEPT).build()).getGroups().get(0);
+
+		assertEquals("cd4-z", group.getLatest().getDocument().getResourceUuid());
+		assertEquals(Arrays.asList("cd4-z", "cd4-a"),
+		    group.getRecent().stream().map(QueryDocument::getResourceUuid).collect(Collectors.toList()));
+	}
+
+	@Test
+	public void collapseByConcept_keepsConceptlessDocumentsAsGroupsOfOne() {
+		index(obs("cd4-1", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-03-12"));
+		index(doc("encounter", "enc-1", null, "Encounter: HIV clinic, CD4 drawn", "2026-03-12"));
+
+		QueryResult result = service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD)
+		        .collapse(QuerySpec.Collapse.CONCEPT).build());
+
+		assertEquals(2, result.getGroups().size());
+		QueryResult.ConceptGroup encounter = result.getGroups().stream().filter(g -> g.getConceptUuid() == null)
+		        .findFirst().get();
+		assertEquals(1, encounter.getCount());
+		assertEquals("enc-1", encounter.getLatest().getDocument().getResourceUuid());
+	}
+
+	@Test
+	public void collapseByConcept_ordersGroupsByBestMemberRelevance_andPagesOverGroups() {
+		// "malaria" twice in the condition text outranks the single mention in the obs, under BM25.
+		index(obs("obs-1", "concept-test", "Malaria test result: negative", null, "2026-06-01"));
+		index(doc("condition", "cond-1", MALARIA, "Malaria, malaria", "2025-01-01"));
+
+		QueryResult page1 = service.query(spec("malaria").mode(QuerySpec.Mode.KEYWORD)
+		        .collapse(QuerySpec.Collapse.CONCEPT).limit(1).build());
+		QueryResult page2 = service.query(spec("malaria").mode(QuerySpec.Mode.KEYWORD)
+		        .collapse(QuerySpec.Collapse.CONCEPT).limit(1).offset(1).build());
+		QueryResult recent = service.query(spec("malaria").mode(QuerySpec.Mode.KEYWORD)
+		        .collapse(QuerySpec.Collapse.CONCEPT).sort(QuerySpec.Sort.RECENT).build());
+
+		assertEquals(MALARIA, page1.getGroups().get(0).getConceptUuid());
+		assertEquals("concept-test", page2.getGroups().get(0).getConceptUuid());
+		assertEquals("recent sort orders groups by their latest", "concept-test",
+		    recent.getGroups().get(0).getConceptUuid());
+	}
+
+	// ---------- facets and paging ----------
+
+	@Test
+	public void resourceTypeFacet_countsTheWholePool_notJustThePage() {
+		index(obs("obs-1", MALARIA, "Diagnosis: Malaria", null, "2026-01-01"));
+		index(obs("obs-2", MALARIA, "Malaria smear: positive", null, "2026-01-03"));
+		index(doc("condition", "cond-1", MALARIA, "Condition: Malaria, active", "2026-01-02"));
+
+		QueryResult result = service.query(spec("malaria").mode(QuerySpec.Mode.KEYWORD).limit(1)
+		        .facet(QuerySpec.Facet.RESOURCE_TYPE).build());
+
+		assertEquals(1, result.getHits().size());
+		assertEquals(Integer.valueOf(2), result.getResourceTypeCounts().get("obs"));
+		assertEquals(Integer.valueOf(1), result.getResourceTypeCounts().get("condition"));
+		assertNull("facets are absent unless asked for",
+		    service.query(spec("malaria").mode(QuerySpec.Mode.KEYWORD).build()).getResourceTypeCounts());
+	}
+
+	@Test
+	public void hybridMode_recentSortAndFacets_countOnlyKeywordMatches() {
+		// kNN returns the weight obs for "cd4" (every vector is the same here), and it is the newest
+		// record. Relevance order may show it; a date sort or a count must not treat it as a match.
+		index(obs("cd4-1", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-03-12"));
+		index(obs("weight-1", "concept-weight", "Weight: 61.0 kg", 61.0, "2026-09-01"));
+
+		QueryResult relevance = service.query(spec("cd4").mode(QuerySpec.Mode.HYBRID).build());
+		QueryResult recent = service.query(spec("cd4").mode(QuerySpec.Mode.HYBRID).sort(QuerySpec.Sort.RECENT)
+		        .facet(QuerySpec.Facet.RESOURCE_TYPE).build());
+
+		assertEquals(2, relevance.getHits().size());
+		assertEquals(Collections.singletonList("cd4-1"), uuids(recent.getHits()));
+		assertEquals(Collections.singletonMap("obs", 1), recent.getResourceTypeCounts());
+	}
+
+	@Test
+	public void offsetAndLimit_pageTheHits() {
+		index(obs("g-1", "concept-glucose", "Glucose: 5.1 mmol/L", 5.1, "2026-01-01"));
+		index(obs("g-2", "concept-glucose", "Glucose: 6.1 mmol/L", 6.1, "2026-02-01"));
+		index(obs("g-3", "concept-glucose", "Glucose: 7.1 mmol/L", 7.1, "2026-03-01"));
+
+		QueryResult.Hit[] pages = {
+		        only(service.query(spec("glucose").mode(QuerySpec.Mode.KEYWORD).sort(QuerySpec.Sort.RECENT).limit(1)
+		                .offset(0).build())),
+		        only(service.query(spec("glucose").mode(QuerySpec.Mode.KEYWORD).sort(QuerySpec.Sort.RECENT).limit(1)
+		                .offset(2).build())) };
+
+		assertEquals("g-3", pages[0].getDocument().getResourceUuid());
+		assertEquals("g-1", pages[1].getDocument().getResourceUuid());
+		assertTrue(service.query(spec("glucose").mode(QuerySpec.Mode.KEYWORD).offset(3).build()).getHits().isEmpty());
+	}
+
+	// ---------- cold patient ----------
+
+	@Test
+	public void coldPatient_withoutWait_warmsInTheBackgroundAndAnswersEmptyAtOnce() {
+		QueryResult result = service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD)
+		        .collapse(QuerySpec.Collapse.CONCEPT).wait(false).build());
+
+		assertEquals(IndexStatus.PROJECTING, result.getStatus());
+		assertTrue(result.getHits().isEmpty());
+		assertTrue("a collapsed cold answer still carries an (empty) groups list", result.getGroups().isEmpty());
+		assertEquals(Collections.singletonList(PATIENT), launcher.launched);
+		assertTrue("wait=false must not project on the request thread", bootstrap.ensureIndexedCalls.isEmpty());
+
+		// While the warm runs, a second keystroke neither blocks nor launches another.
+		launcher.warming = true;
+		QueryResult again = service.query(spec("cd4").wait(false).build());
+		assertEquals(IndexStatus.PROJECTING, again.getStatus());
+		assertEquals(1, launcher.launched.size());
+	}
+
+	@Test
+	public void coldPatient_withoutWait_reportsNotIndexed_whenNoWarmCanStart() {
+		launcher.accept = false;
+
+		QueryResult result = service.query(spec("cd4").wait(false).build());
+
+		assertEquals(IndexStatus.NOT_INDEXED, result.getStatus());
+	}
+
+	@Test
+	public void coldPatient_withWait_projectsOnTheRequestThreadThenSearches() {
+		bootstrap.onEnsureIndexed = uuid -> index(obs("cd4-1", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-03-12"));
+
+		QueryResult result = service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD).build());
+
+		assertEquals(Collections.singletonList(PATIENT), bootstrap.ensureIndexedCalls);
+		assertEquals(IndexStatus.INDEXED, result.getStatus());
+		assertEquals(1, result.getHits().size());
+		assertTrue(launcher.launched.isEmpty());
+	}
+
+	@Test
+	public void indexStatus_readsProjectingWhileAWarmRuns_evenWhenSomeTypesHaveLanded() {
+		assertEquals(IndexStatus.NOT_INDEXED, service.getIndexStatus(PATIENT));
+		index(obs("cd4-1", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-03-12"));
+		assertEquals(IndexStatus.INDEXED, service.getIndexStatus(PATIENT));
+		launcher.warming = true;
+		assertEquals(IndexStatus.PROJECTING, service.getIndexStatus(PATIENT));
+	}
+
+	@Test
+	public void warm_onAnIndexedPatient_startsNothing() {
+		index(obs("cd4-1", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-03-12"));
+
+		assertEquals(IndexStatus.INDEXED, service.warm(PATIENT));
+		assertTrue(launcher.launched.isEmpty());
+	}
+
+	// ---------- spec validation ----------
+
+	@Test
+	public void spec_rejectsAMissingPatient_andARelevanceSortWithNothingToRank() {
+		expectInvalid(() -> QuerySpec.forPatient(" ").query("cd4").build());
+		expectInvalid(() -> QuerySpec.forPatient(PATIENT).build());
+		expectInvalid(() -> QuerySpec.forPatient(PATIENT).query("cd4").limit(0).build());
+		expectInvalid(() -> QuerySpec.forPatient(PATIENT).query("cd4").offset(-1).build());
+	}
+
+	// ---------- toMap ----------
+
+	@Test
+	public void toMap_shapesHitsGroupsAndFacetsForTheRestResponse() {
+		for (int month = 1; month <= 2; month++) {
+			index(obs("cd4-" + month, CD4, "CD4 count: " + (300 + month) + ".0 cells/µL", 300.0 + month,
+			    "2026-0" + month + "-15"));
+		}
+
+		Map<String, Object> body = service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD)
+		        .collapse(QuerySpec.Collapse.CONCEPT).facet(QuerySpec.Facet.RESOURCE_TYPE).build()).toMap();
+
+		assertEquals("indexed", body.get("status"));
+		assertEquals(Collections.emptyList(), body.get("hits"));
+		@SuppressWarnings("unchecked")
+		Map<String, Object> group = ((List<Map<String, Object>>) body.get("groups")).get(0);
+		assertEquals(CD4, group.get("conceptUuid"));
+		assertEquals("CD4 count", group.get("conceptName"));
+		assertEquals(2, group.get("count"));
+		@SuppressWarnings("unchecked")
+		Map<String, Object> latest = (Map<String, Object>) group.get("latest");
+		assertEquals("obs", latest.get("resourceType"));
+		assertEquals("cd4-2", latest.get("resourceUuid"));
+		assertEquals("2026-02-15", latest.get("date"));
+		assertEquals("CD4 count: 302.0 cells/µL", latest.get("snippet"));
+		assertEquals(CD4, latest.get("conceptUuid"));
+		assertEquals(302.0, ((Number) latest.get("valueNumeric")).doubleValue(), 0.0);
+		@SuppressWarnings("unchecked")
+		List<Map<String, Object>> values = (List<Map<String, Object>>) group.get("recentValues");
+		assertEquals(Arrays.asList("2026-02-15", "2026-01-15"),
+		    values.stream().map(v -> v.get("date")).collect(Collectors.toList()));
+		@SuppressWarnings("unchecked")
+		Map<String, Object> facet = (Map<String, Object>) ((Map<String, Object>) body.get("facets")).get("resourceType");
+		assertEquals(true, facet.get("approximate"));
+		assertEquals(Collections.singletonMap("obs", 2), facet.get("counts"));
+	}
+
+	// ---------- helpers ----------
+
+	private static QuerySpec.Builder spec(String query) {
+		return QuerySpec.forPatient(PATIENT).query(query);
+	}
+
+	private void index(QueryDocument d) {
+		assertTrue(backend.upsert(d).isSucceeded());
+	}
+
+	private static QueryDocument obs(String uuid, String concept, String text, Double value, String date) {
+		QueryDocument d = doc("obs", uuid, concept, text, date);
+		if (value != null) {
+			d.putMetadata(FIELD_VALUE_NUMERIC, value);
+		}
+		return d;
+	}
+
+	private static QueryDocument doc(String type, String uuid, String concept, String text, String date) {
+		QueryDocument d = new QueryDocument();
+		d.setResourceType(type);
+		d.setResourceUuid(uuid);
+		d.setPatientUuid(PATIENT);
+		d.setDate(LocalDate.parse(date));
+		d.setText(text);
+		d.setEmbedding(CountingEmbeddingProvider.VECTOR);
+		if (concept != null) {
+			d.putMetadata(FIELD_CONCEPT_UUID, concept);
+			d.putMetadata(FIELD_CONCEPT_NAME, text.substring(0, text.indexOf(':') < 0 ? text.length()
+			        : text.indexOf(':')));
+		}
+		return d;
+	}
+
+	private static List<String> uuids(List<QueryResult.Hit> hits) {
+		List<String> out = new ArrayList<>();
+		hits.forEach(h -> out.add(h.getDocument().getResourceUuid()));
+		return out;
+	}
+
+	private static QueryResult.Hit only(QueryResult result) {
+		assertEquals(1, result.getHits().size());
+		return result.getHits().get(0);
+	}
+
+	private static void expectInvalid(Runnable build) {
+		try {
+			build.run();
+			fail("expected IllegalArgumentException");
+		}
+		catch (IllegalArgumentException expected) {
+			// pass
+		}
+	}
+
+	// ---------- fakes ----------
+
+	/** Records launches instead of spawning daemon threads; {@code warming} stands in for one running. */
+	private static final class FakeLauncher extends BootstrapLauncher {
+
+		final List<String> launched = new ArrayList<>();
+
+		boolean accept = true;
+
+		boolean warming;
+
+		@Override
+		public boolean launchEnsureIndexedAsync(String patientUuid) {
+			if (!accept) {
+				return false;
+			}
+			launched.add(patientUuid);
+			warming = true;
+			return true;
+		}
+
+		@Override
+		public boolean isWarming(String patientUuid) {
+			return warming;
+		}
+	}
+
+	private static final class CountingEmbeddingProvider implements EmbeddingProvider {
+
+		static final float[] VECTOR = { 1f, 0f, 0f, 0f };
+
+		final AtomicInteger embedQueryCount = new AtomicInteger();
+
+		@Override public int getDimensions() { return 4; }
+
+		@Override public float[] embed(String text) { return VECTOR; }
+
+		@Override public float[] embedQuery(String text) {
+			embedQueryCount.incrementAndGet();
+			return VECTOR;
+		}
+
+		@Override public String getModelName() { return "fixed"; }
+	}
+
+	private static final class RecordingBootstrapService implements BootstrapService {
+
+		final List<String> ensureIndexedCalls = new ArrayList<>();
+
+		java.util.function.Consumer<String> onEnsureIndexed;
+
+		@Override public void bootstrap() { }
+		@Override public void bootstrap(String resourceType) { }
+		@Override public void resyncType(String resourceType) { }
+		@Override public List<String> getResourceTypeNames() { return Collections.emptyList(); }
+		@Override public void ensureIndexed(String patientUuid) {
+			ensureIndexedCalls.add(patientUuid);
+			if (onEnsureIndexed != null) {
+				onEnsureIndexed.accept(patientUuid);
+			}
+		}
+		@Override public void reindexPatient(String patientUuid) { }
+		@Override public List<BootstrapProgress> getStatus() { return Collections.emptyList(); }
+		@Override public BootstrapProgress getStatus(String resourceType) { return null; }
+		@Override public DriftReport getDrift() { return null; }
+		@Override public void onStartup() { }
+		@Override public void onShutdown() { }
+	}
+}

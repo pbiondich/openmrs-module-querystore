@@ -22,11 +22,15 @@ import java.util.Map;
 
 import org.junit.After;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.openmrs.User;
 import org.openmrs.api.APIAuthenticationException;
 import org.openmrs.api.context.Context;
 import org.openmrs.api.context.ContextAuthenticationException;
 import org.openmrs.api.context.UserContext;
+import org.openmrs.module.querystore.api.IndexStatus;
+import org.openmrs.module.querystore.api.QueryResult;
+import org.openmrs.module.querystore.api.QuerySpec;
 import org.openmrs.module.querystore.api.QueryStoreService;
 import org.openmrs.module.querystore.bootstrap.BootstrapLauncher;
 import org.openmrs.module.querystore.bootstrap.BootstrapService;
@@ -374,6 +378,158 @@ public class QueryStoreRestControllerTest {
 
 	/** Authenticates the thread with a user that holds every privilege, so the controller's
 	 *  up-front {@code Context.requirePrivilege} gate passes and the routing logic under test runs. */
+	// ---------- patient-scoped consumer endpoints ----------
+
+	@Test
+	public void search_mapsEveryParameterOntoTheSpec_andReturnsTheResultMap() {
+		authenticate();
+		QueryStoreService queryStore = mock(QueryStoreService.class);
+		when(queryStore.query(org.mockito.ArgumentMatchers.any(QuerySpec.class)))
+		        .thenReturn(QueryResult.empty(IndexStatus.INDEXED, QuerySpec.forPatient("p").query("x").build()));
+		controller.setQueryStoreService(queryStore);
+
+		ResponseEntity<Object> response = controller.search("patient-uuid", "cd4", "KEYWORD", "obs, condition", "recent",
+		    "concept", "resourceType", 5, 10, false);
+
+		assertEquals(HttpStatus.OK, response.getStatusCode());
+		assertEquals("indexed", ((Map<?, ?>) response.getBody()).get("status"));
+		ArgumentCaptor<QuerySpec> captor = ArgumentCaptor.forClass(QuerySpec.class);
+		verify(queryStore).query(captor.capture());
+		QuerySpec spec = captor.getValue();
+		assertEquals("patient-uuid", spec.getPatientUuid());
+		assertEquals("cd4", spec.getQuery());
+		assertEquals(QuerySpec.Mode.KEYWORD, spec.getMode());
+		assertEquals(Arrays.asList("obs", "condition"), spec.getTypes());
+		assertEquals(QuerySpec.Sort.RECENT, spec.getSort());
+		assertEquals(QuerySpec.Collapse.CONCEPT, spec.getCollapse());
+		assertEquals(Collections.singleton(QuerySpec.Facet.RESOURCE_TYPE), spec.getFacets());
+		assertEquals(5, spec.getLimit());
+		assertEquals(10, spec.getOffset());
+		assertEquals(false, spec.isWait());
+	}
+
+	@Test
+	public void search_defaultsToHybridRelevanceUncollapsedAndWaiting() {
+		authenticate();
+		QueryStoreService queryStore = mock(QueryStoreService.class);
+		when(queryStore.query(org.mockito.ArgumentMatchers.any(QuerySpec.class)))
+		        .thenReturn(QueryResult.empty(IndexStatus.INDEXED, QuerySpec.forPatient("p").query("x").build()));
+		controller.setQueryStoreService(queryStore);
+
+		controller.search("patient-uuid", "cd4", null, null, null, null, null, null, null, true);
+
+		ArgumentCaptor<QuerySpec> captor = ArgumentCaptor.forClass(QuerySpec.class);
+		verify(queryStore).query(captor.capture());
+		QuerySpec spec = captor.getValue();
+		assertEquals(QuerySpec.Mode.HYBRID, spec.getMode());
+		assertEquals(QuerySpec.Sort.RELEVANCE, spec.getSort());
+		assertEquals(QuerySpec.Collapse.NONE, spec.getCollapse());
+		assertEquals(QuerySpec.DEFAULT_LIMIT, spec.getLimit());
+		assertEquals(true, spec.isWait());
+		assertEquals(Collections.emptyList(), spec.getTypes());
+	}
+
+	@Test
+	public void search_rejectsBadParametersWith400_beforeTouchingTheService() {
+		authenticate();
+		QueryStoreService queryStore = mock(QueryStoreService.class);
+		controller.setQueryStoreService(queryStore);
+
+		String[] errors = {
+		        badRequest(() -> controller.search("p", " ", null, null, null, null, null, null, null, true)),
+		        badRequest(() -> controller.search("p", "cd4", "fuzzy", null, null, null, null, null, null, true)),
+		        badRequest(() -> controller.search("p", "cd4", null, null, "oldest", null, null, null, null, true)),
+		        badRequest(() -> controller.search("p", "cd4", null, null, null, "drug", null, null, null, true)),
+		        badRequest(() -> controller.search("p", "cd4", null, null, null, null, "concept", null, null, true)),
+		        badRequest(() -> controller.search("p", "cd4", null, null, null, null, null, 51, null, true)),
+		        badRequest(() -> controller.search("p", "cd4", null, null, null, null, null, 0, null, true)),
+		        badRequest(() -> controller.search("p", "cd4", null, null, null, null, null, null, -1, true)) };
+
+		for (String error : errors) {
+			assertNotNull(error);
+		}
+		org.mockito.Mockito.verifyNoInteractions(queryStore);
+	}
+
+	@Test
+	public void recent_isANonBlockingNewestFirstBrowseCappedAtMaxPage() {
+		authenticate();
+		QueryStoreService queryStore = mock(QueryStoreService.class);
+		when(queryStore.query(org.mockito.ArgumentMatchers.any(QuerySpec.class)))
+		        .thenReturn(QueryResult.empty(IndexStatus.PROJECTING, QuerySpec.forPatient("p").query("x").build()));
+		controller.setQueryStoreService(queryStore);
+
+		ResponseEntity<Object> response = controller.recent("patient-uuid", null, "obs", false);
+
+		assertEquals("projecting", ((Map<?, ?>) response.getBody()).get("status"));
+		assertEquals(Collections.emptyList(), ((Map<?, ?>) response.getBody()).get("hits"));
+		ArgumentCaptor<QuerySpec> captor = ArgumentCaptor.forClass(QuerySpec.class);
+		verify(queryStore).query(captor.capture());
+		QuerySpec spec = captor.getValue();
+		assertEquals(null, spec.getQuery());
+		assertEquals(QuerySpec.Sort.RECENT, spec.getSort());
+		assertEquals(5, spec.getLimit());
+		assertEquals(Collections.singletonList("obs"), spec.getTypes());
+		assertEquals(false, spec.isWait());
+		assertNotNull("no way to ask recent for the whole chart",
+		    badRequest(() -> controller.recent("patient-uuid", QueryStoreRestController.MAX_PAGE + 1, null, false)));
+	}
+
+	@Test
+	public void warm_returns202WithTheStatus_andStatusReturns200() {
+		authenticate();
+		QueryStoreService queryStore = mock(QueryStoreService.class);
+		when(queryStore.warm("patient-uuid")).thenReturn(IndexStatus.PROJECTING);
+		when(queryStore.getIndexStatus("patient-uuid")).thenReturn(IndexStatus.NOT_INDEXED);
+		controller.setQueryStoreService(queryStore);
+
+		ResponseEntity<Object> warm = controller.warm("patient-uuid");
+		ResponseEntity<Object> status = controller.status("patient-uuid");
+
+		assertEquals(HttpStatus.ACCEPTED, warm.getStatusCode());
+		assertEquals("projecting", ((Map<?, ?>) warm.getBody()).get("status"));
+		assertEquals(HttpStatus.OK, status.getStatusCode());
+		assertEquals("not_indexed", ((Map<?, ?>) status.getBody()).get("status"));
+	}
+
+	@Test
+	public void warm_onAnIndexedPatient_returns200_sinceNothingWasStarted() {
+		authenticate();
+		QueryStoreService queryStore = mock(QueryStoreService.class);
+		when(queryStore.warm("patient-uuid")).thenReturn(IndexStatus.INDEXED);
+		controller.setQueryStoreService(queryStore);
+
+		ResponseEntity<Object> warm = controller.warm("patient-uuid");
+
+		assertEquals(HttpStatus.OK, warm.getStatusCode());
+		assertEquals("indexed", ((Map<?, ?>) warm.getBody()).get("status"));
+	}
+
+	@Test(expected = ContextAuthenticationException.class)
+	public void patientEndpoints_requireGetPatients() {
+		Context.setUserContext(new UserContext(null) {
+
+			@Override
+			public boolean hasPrivilege(String privilege) {
+				return false;
+			}
+		});
+		controller.search("patient-uuid", "cd4", null, null, null, null, null, null, null, true);
+	}
+
+	/** Runs a call expected to fail parameter validation and returns the 400 body's error. */
+	private String badRequest(Runnable call) {
+		try {
+			call.run();
+		}
+		catch (QueryStoreRestController.BadParameterException e) {
+			ResponseEntity<Object> response = controller.handleBadParameter(e);
+			assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+			return errorOf(response);
+		}
+		throw new AssertionError("expected a 400");
+	}
+
 	private static void authenticate() {
 		Context.setUserContext(new UserContext(null) {
 

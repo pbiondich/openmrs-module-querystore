@@ -162,4 +162,36 @@ public interface QueryStoreService extends OpenmrsService {
 	 */
 	@Authorized(PrivilegeConstants.GET_PATIENTS)
 	List<QueryDocument> getPatientChart(String patientUuid);
+
+	/**
+	 * Patient-scoped query with a retrieval mode, type filter, sort, collapse-by-concept, facets and
+	 * paging (prototype consumer API for the omnibar; see {@link QuerySpec}). Same authorization as
+	 * {@link #searchByPatient}. A cold patient is projected first when {@link QuerySpec#isWait()},
+	 * else warmed in the background and answered at once with an empty
+	 * {@link IndexStatus#PROJECTING} result.
+	 *
+	 * <p>A {@code default} so existing implementers (test doubles) keep compiling, mirroring
+	 * {@link #bulkIndex}; the production {@code QueryStoreServiceImpl} overrides it.
+	 */
+	@Authorized(PrivilegeConstants.GET_PATIENTS)
+	default QueryResult query(QuerySpec spec) {
+		throw new UnsupportedOperationException("query is not implemented by " + getClass().getName());
+	}
+
+	/** Whether the patient's chart is indexed, being projected, or not indexed. */
+	@Authorized(PrivilegeConstants.GET_PATIENTS)
+	default IndexStatus getIndexStatus(String patientUuid) {
+		throw new UnsupportedOperationException("getIndexStatus is not implemented by " + getClass().getName());
+	}
+
+	/**
+	 * Starts projecting a never-indexed patient on a background thread and returns at once.
+	 * Idempotent: an indexed patient, or one already being projected, starts nothing. Returns the
+	 * status after the call; {@link IndexStatus#NOT_INDEXED} means nothing could be started (the
+	 * daemon isn't up yet, or too many warms are running) and the caller may retry.
+	 */
+	@Authorized(PrivilegeConstants.GET_PATIENTS)
+	default IndexStatus warm(String patientUuid) {
+		throw new UnsupportedOperationException("warm is not implemented by " + getClass().getName());
+	}
 }

@@ -9,6 +9,8 @@
  */
 package org.openmrs.module.querystore.bootstrap;
 
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
@@ -48,6 +50,12 @@ public class BootstrapLauncher {
 	// concurrent runs from corrupting progress bookkeeping; this additionally stops redundant daemon
 	// threads from piling up parked on those locks and re-scanning an already-complete cursor.
 	private final AtomicBoolean running = new AtomicBoolean(false);
+
+	static final int MAX_CONCURRENT_PATIENT_WARMS = 4;
+
+	// Patients with a launchEnsureIndexedAsync projection in flight: the per-patient in-flight guard,
+	// and the source of the "projecting" index status.
+	private final Set<String> warmingPatients = ConcurrentHashMap.newKeySet();
 
 	public void setDaemonToken(DaemonToken token) {
 		this.daemonToken = token;
@@ -142,6 +150,70 @@ public class BootstrapLauncher {
 			}
 		}, token);
 		return true;
+	}
+
+	/**
+	 * Projects one never-indexed patient on a daemon thread ({@link BootstrapService#ensureIndexed}),
+	 * returning immediately. Backs the omnibar's warm-on-chart-open: the chart is projected while the
+	 * user reads the banner, so the first keystroke doesn't pay the cold projection.
+	 *
+	 * <p>Idempotent per patient: a request for a patient already in flight is a no-op that reports
+	 * success. Bounded across patients by {@link #MAX_CONCURRENT_PATIENT_WARMS}: {@link Daemon} spawns a
+	 * thread per call rather than drawing from a pool, so without a cap a burst of chart opens would
+	 * run that many projections (and embedding passes) at once.
+	 *
+	 * @return {@code true} once a projection for this patient is in flight (newly launched or already
+	 *         running); {@code false} when no {@link DaemonToken} is wired yet or the concurrency cap is
+	 *         reached, in which case nothing runs and the caller may retry later.
+	 */
+	public boolean launchEnsureIndexedAsync(String patientUuid) {
+		DaemonToken token = this.daemonToken;
+		if (token == null || patientUuid == null) {
+			return false;
+		}
+		if (warmingPatients.contains(patientUuid)) {
+			log.debug("Patient warm already in flight; ignoring duplicate");
+			return true;
+		}
+		// Check-then-add is racy against the cap by at most the number of racing callers, which is an
+		// acceptable overshoot for a soft limit; the per-patient add below is the exact guard.
+		if (warmingPatients.size() >= MAX_CONCURRENT_PATIENT_WARMS) {
+			log.debug("Patient warm cap reached; not launching another");
+			return false;
+		}
+		if (!warmingPatients.add(patientUuid)) {
+			log.debug("Patient warm already in flight; ignoring duplicate");
+			return true;
+		}
+		log.debug("Patient warm starting (" + warmingPatients.size() + " in flight)");
+		try {
+			daemonExecutor.execute(() -> {
+				try {
+					Context.getService(BootstrapService.class).ensureIndexed(patientUuid);
+				}
+				catch (RuntimeException e) {
+					// Fire-and-forget: no caller upstack. The next cold read retries via the lazy path.
+					log.warn("Background warm for patient " + patientUuid + " failed", e);
+				}
+				finally {
+					warmingPatients.remove(patientUuid);
+				}
+			}, token);
+		}
+		catch (RuntimeException e) {
+			warmingPatients.remove(patientUuid);
+			throw e;
+		}
+		return true;
+	}
+
+	/**
+	 * True while a {@link #launchEnsureIndexedAsync} projection for this patient is running. Does not
+	 * see a synchronous cold-touch projection (a {@code searchByPatient} on a never-indexed patient),
+	 * which runs on the request thread.
+	 */
+	public boolean isWarming(String patientUuid) {
+		return patientUuid != null && warmingPatients.contains(patientUuid);
 	}
 
 	/**

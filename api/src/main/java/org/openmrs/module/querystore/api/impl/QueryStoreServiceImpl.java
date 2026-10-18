@@ -9,17 +9,28 @@
  */
 package org.openmrs.module.querystore.api.impl;
 
+import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.openmrs.api.context.Context;
 import org.openmrs.api.impl.BaseOpenmrsService;
+import org.openmrs.module.querystore.QueryStoreConstants;
+import org.openmrs.module.querystore.api.IndexStatus;
+import org.openmrs.module.querystore.api.QueryResult;
+import org.openmrs.module.querystore.api.QuerySpec;
 import org.openmrs.module.querystore.api.QueryStoreService;
 import org.openmrs.module.querystore.backend.BackendStore;
 import org.openmrs.module.querystore.backend.BulkWriteResult;
@@ -28,6 +39,7 @@ import org.openmrs.module.querystore.backend.Filter;
 import org.openmrs.module.querystore.backend.SearchRequest;
 import org.openmrs.module.querystore.backend.SearchResult;
 import org.openmrs.module.querystore.backend.WriteResult;
+import org.openmrs.module.querystore.bootstrap.BootstrapLauncher;
 import org.openmrs.module.querystore.bootstrap.BootstrapService;
 import org.openmrs.module.querystore.embedding.EmbeddingProvider;
 import org.openmrs.module.querystore.model.QueryDocument;
@@ -69,6 +81,18 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 			        return size() > QUERY_EMBED_CACHE_MAX;
 		        }
 	        });
+
+	// Candidate pool for query(): its service-layer collapse, recency sort, facets and paging all run
+	// over this many backend hits.
+	static final int CANDIDATE_POOL = 200;
+
+	// Optional: without it, query()/warm() can't start a background projection and getIndexStatus()
+	// never reports PROJECTING. Wired in moduleApplicationContext.xml.
+	private BootstrapLauncher bootstrapLauncher;
+
+	public void setBootstrapLauncher(BootstrapLauncher bootstrapLauncher) {
+		this.bootstrapLauncher = bootstrapLauncher;
+	}
 
 	public void setBackend(BackendStore backend) {
 		this.backend = backend;
@@ -256,6 +280,242 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 		}
 		return backend.findAllByPatient(patientUuid);
 	}
+
+	@Override
+	public IndexStatus getIndexStatus(String patientUuid) {
+		if (backend == null || patientUuid == null) {
+			return IndexStatus.NOT_INDEXED;
+		}
+		// Warming first: a background projection writes type by type, so existsByPatient turns true
+		// long before the chart is complete.
+		if (bootstrapLauncher != null && bootstrapLauncher.isWarming(patientUuid)) {
+			return IndexStatus.PROJECTING;
+		}
+		return backend.existsByPatient(patientUuid) ? IndexStatus.INDEXED : IndexStatus.NOT_INDEXED;
+	}
+
+	@Override
+	public IndexStatus warm(String patientUuid) {
+		IndexStatus status = getIndexStatus(patientUuid);
+		if (status != IndexStatus.NOT_INDEXED || backend == null || patientUuid == null) {
+			return status;
+		}
+		return bootstrapLauncher != null && bootstrapLauncher.launchEnsureIndexedAsync(patientUuid)
+		        ? IndexStatus.PROJECTING : IndexStatus.NOT_INDEXED;
+	}
+
+	/**
+	 * Prototype: collapse, recency sort, facets and paging all run here, over a candidate pool of the
+	 * top {@link #CANDIDATE_POOL} backend hits (or the whole chart for a recency browse). Each has a
+	 * backend-native form that would scale better, noted where it happens.
+	 */
+	@Override
+	public QueryResult query(QuerySpec spec) {
+		if (backend == null) {
+			return QueryResult.empty(IndexStatus.NOT_INDEXED, spec);
+		}
+		String patientUuid = spec.getPatientUuid();
+		IndexStatus status = getIndexStatus(patientUuid);
+		if (status != IndexStatus.INDEXED) {
+			if (!spec.isWait()) {
+				// A partly-projected chart answers "no CD4" for a patient whose obs haven't landed
+				// yet, so a projecting patient gets nothing rather than a misleading partial answer.
+				return QueryResult.empty(warm(patientUuid), spec);
+			}
+			// Blocks on the per-patient lock while a background warm finishes, then short-circuits.
+			ensureIndexedSafely(patientUuid);
+			status = getIndexStatus(patientUuid);
+		}
+
+		List<QueryResult.Hit> pool = candidates(spec);
+		boolean faceted = spec.getFacets().contains(QuerySpec.Facet.RESOURCE_TYPE);
+		// Hybrid's vector half returns its nearest documents however far they are, so it has no match
+		// boundary: relevance order demotes the far ones, but a date sort or a count would not. Both
+		// therefore run over the keyword matches only.
+		List<QueryResult.Hit> matches = spec.getMode() == QuerySpec.Mode.HYBRID && spec.getQuery() != null
+		        && (spec.getSort() == QuerySpec.Sort.RECENT || faceted) ? keywordMatches(spec, pool) : pool;
+		if (spec.getSort() == QuerySpec.Sort.RECENT) {
+			// Backend-native: a record_date sort on the search itself (ES "sort", Lucene Sort on the
+			// RECORD_DATE doc value) instead of re-sorting a relevance-capped pool, which drops older
+			// matches that ranked below the cap.
+			pool = new ArrayList<>(matches);
+			pool.sort(NEWEST_FIRST);
+		}
+		Map<String, Integer> typeCounts = faceted ? countByResourceType(matches) : null;
+
+		List<QueryResult.Hit> hits;
+		List<QueryResult.ConceptGroup> groups = null;
+		if (spec.getCollapse() == QuerySpec.Collapse.CONCEPT) {
+			groups = page(collapseByConcept(pool, spec), spec.getOffset(), spec.getLimit());
+			hits = Collections.emptyList();
+			List<QueryDocument> logged = new ArrayList<>(groups.size());
+			groups.forEach(g -> logged.add(g.getLatest().getDocument()));
+			emitRetrievalLog(spec.getQuery(), logged);
+		} else {
+			hits = page(pool, spec.getOffset(), spec.getLimit());
+			List<QueryDocument> logged = new ArrayList<>(hits.size());
+			hits.forEach(h -> logged.add(h.getDocument()));
+			emitRetrievalLog(spec.getQuery(), logged);
+		}
+		return new QueryResult(status, hits, groups, typeCounts);
+	}
+
+	private List<QueryResult.Hit> candidates(QuerySpec spec) {
+		List<QueryResult.Hit> pool = new ArrayList<>();
+		if (spec.getQuery() == null) {
+			// Recency browse: the whole chart, already newest first. Backend-native: a patient-scoped,
+			// type-filtered top-N by record_date, instead of materializing the chart to keep N.
+			for (QueryDocument d : backend.findAllByPatient(spec.getPatientUuid())) {
+				if (spec.getTypes().isEmpty() || spec.getTypes().contains(d.getResourceType())) {
+					pool.add(new QueryResult.Hit(d, null));
+				}
+			}
+			return pool;
+		}
+		SearchRequest.Builder req = searchRequest(spec);
+		SearchResult result;
+		if (spec.getMode() == QuerySpec.Mode.KEYWORD) {
+			result = backend.bm25(req.build());
+		} else {
+			if (embeddingProvider != null) {
+				req.queryVector(embedQueryCached(spec.getQuery()));
+			}
+			result = backend.hybrid(req.build());
+		}
+		result.getHits().forEach(h -> pool.add(new QueryResult.Hit(h.getDocument(), h.getRawScore())));
+		return pool;
+	}
+
+	private static SearchRequest.Builder searchRequest(QuerySpec spec) {
+		return SearchRequest.builder().queryText(spec.getQuery()).limit(CANDIDATE_POOL).resourceTypes(spec.getTypes())
+		        .filter(Filter.patientScope(spec.getPatientUuid()));
+	}
+
+	/**
+	 * The hybrid pool's hits that also match by keyword, in pool order. Costs a second BM25 pass
+	 * (hybrid's own is internal to the backend). Backend-native: return the BM25 match set alongside
+	 * the fused ranking, or apply a vector-similarity floor.
+	 */
+	private List<QueryResult.Hit> keywordMatches(QuerySpec spec, List<QueryResult.Hit> pool) {
+		Set<String> matched = new HashSet<>();
+		backend.bm25(searchRequest(spec).build()).getHits()
+		        .forEach(h -> matched.add(h.getDocument().getResourceUuid()));
+		List<QueryResult.Hit> out = new ArrayList<>();
+		for (QueryResult.Hit h : pool) {
+			if (matched.contains(h.getDocument().getResourceUuid())) {
+				out.add(h);
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * Groups the pool by {@code concept_uuid}, in order of each group's best-ranked member (or newest
+	 * first under {@link QuerySpec.Sort#RECENT}). A group's latest, count and recent values come from
+	 * the patient's whole chart rather than the pool, because the pool is ranked by relevance: the
+	 * newest CD4 need not be among the top matches for "cd4".
+	 *
+	 * <p>Backend-native: ES field collapsing on {@code concept_uuid} with an {@code inner_hits} sorted
+	 * by {@code record_date} (size 5) and a cardinality/terms aggregation for the count; Lucene
+	 * grouping ({@code GroupingSearch} on a concept_uuid doc-values field) plus a date-sorted
+	 * per-group read. Either removes the full-chart read this does per request.
+	 */
+	private List<QueryResult.ConceptGroup> collapseByConcept(List<QueryResult.Hit> pool, QuerySpec spec) {
+		Map<String, List<QueryResult.Hit>> byKey = new LinkedHashMap<>();
+		Map<String, Double> scoreByResource = new HashMap<>();
+		boolean anyConcept = false;
+		for (QueryResult.Hit h : pool) {
+			QueryDocument d = h.getDocument();
+			String concept = conceptUuid(d);
+			anyConcept |= concept != null;
+			String key = concept != null ? "c:" + concept : "d:" + d.getResourceType() + "/" + d.getResourceUuid();
+			byKey.computeIfAbsent(key, k -> new ArrayList<>()).add(h);
+			if (h.getScore() != null) {
+				scoreByResource.put(d.getResourceUuid(), h.getScore());
+			}
+		}
+
+		Map<String, List<QueryDocument>> chartByConcept = anyConcept ? chartByConcept(spec)
+		        : Collections.<String, List<QueryDocument>> emptyMap();
+		List<QueryResult.ConceptGroup> groups = new ArrayList<>(byKey.size());
+		for (List<QueryResult.Hit> members : byKey.values()) {
+			QueryDocument first = members.get(0).getDocument();
+			String concept = conceptUuid(first);
+			List<QueryDocument> recent = concept == null ? null : chartByConcept.get(concept);
+			if (recent == null || recent.isEmpty()) {
+				// No concept, or the chart read raced a write: fall back to the matching members.
+				recent = new ArrayList<>(members.size());
+				for (QueryResult.Hit m : members) {
+					recent.add(m.getDocument());
+				}
+				recent.sort(NEWEST_DOC);
+			}
+			QueryDocument latest = recent.get(0);
+			Double best = null;
+			for (QueryResult.Hit m : members) {
+				if (m.getScore() != null && (best == null || m.getScore() > best)) {
+					best = m.getScore();
+				}
+			}
+			Object name = latest.getMetadata().get(QueryStoreConstants.FIELD_CONCEPT_NAME);
+			groups.add(new QueryResult.ConceptGroup(concept, name instanceof String ? (String) name : null,
+			        recent.size(), best, new QueryResult.Hit(latest, scoreByResource.get(latest.getResourceUuid())),
+			        recent));
+		}
+		if (spec.getSort() == QuerySpec.Sort.RECENT) {
+			groups.sort((a, b) -> NEWEST_FIRST.compare(a.getLatest(), b.getLatest()));
+		}
+		return groups;
+	}
+
+	/** The patient's chart (within the spec's types), newest first, indexed by concept. */
+	private Map<String, List<QueryDocument>> chartByConcept(QuerySpec spec) {
+		Map<String, List<QueryDocument>> out = new HashMap<>();
+		for (QueryDocument d : backend.findAllByPatient(spec.getPatientUuid())) {
+			String concept = conceptUuid(d);
+			if (concept != null && (spec.getTypes().isEmpty() || spec.getTypes().contains(d.getResourceType()))) {
+				out.computeIfAbsent(concept, k -> new ArrayList<>()).add(d);
+			}
+		}
+		out.values().forEach(docs -> docs.sort(NEWEST_DOC));
+		return out;
+	}
+
+	/**
+	 * Backend-native: ES terms aggregation on {@code _index} (or a resource_type keyword), Lucene
+	 * per-index {@code IndexSearcher.count} with the same query. Both are exact and uncapped.
+	 */
+	private static Map<String, Integer> countByResourceType(List<QueryResult.Hit> pool) {
+		Map<String, Integer> counts = new TreeMap<>();
+		for (QueryResult.Hit h : pool) {
+			counts.merge(h.getDocument().getResourceType(), 1, Integer::sum);
+		}
+		return counts;
+	}
+
+	private static String conceptUuid(QueryDocument d) {
+		Object value = d.getMetadata().get(QueryStoreConstants.FIELD_CONCEPT_UUID);
+		return value instanceof String && !((String) value).isEmpty() ? (String) value : null;
+	}
+
+	private static <T> List<T> page(List<T> all, int offset, int limit) {
+		if (offset >= all.size()) {
+			return Collections.emptyList();
+		}
+		return new ArrayList<>(all.subList(offset, Math.min(all.size(), offset + limit)));
+	}
+
+	// Newest record_date first, undated last. record_date is a day, so two records on the same day
+	// (two CD4s entered for one visit date) tie; last_modified, when the record was entered or last
+	// changed, breaks that tie, then the uuid so the order is stable.
+	private static final Comparator<QueryDocument> NEWEST_DOC = Comparator
+	        .comparing(QueryDocument::getDate, Comparator.nullsLast(Comparator.<LocalDate> reverseOrder()))
+	        .thenComparing(QueryDocument::getLastModified, Comparator.nullsLast(Comparator.<Instant> reverseOrder()))
+	        .thenComparing(QueryDocument::getResourceUuid, Comparator.nullsLast(Comparator.<String> naturalOrder()));
+
+	// Used with a stable sort, so relevance breaks whatever NEWEST_DOC leaves tied.
+	private static final Comparator<QueryResult.Hit> NEWEST_FIRST = Comparator.comparing(QueryResult.Hit::getDocument,
+	    NEWEST_DOC);
 
 	private List<QueryDocument> runHybrid(String query, int limit, Filter scope) {
 		if (StringUtils.isBlank(query) || limit <= 0) {

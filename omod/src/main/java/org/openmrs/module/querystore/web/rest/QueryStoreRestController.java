@@ -9,7 +9,9 @@
  */
 package org.openmrs.module.querystore.web.rest;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
@@ -17,6 +19,9 @@ import org.openmrs.api.APIAuthenticationException;
 import org.openmrs.api.APIException;
 import org.openmrs.api.context.Context;
 import org.openmrs.api.context.ContextAuthenticationException;
+import org.openmrs.module.querystore.api.IndexStatus;
+import org.openmrs.module.querystore.api.QueryResult;
+import org.openmrs.module.querystore.api.QuerySpec;
 import org.openmrs.module.querystore.api.QueryStoreService;
 import org.openmrs.module.querystore.bootstrap.BootstrapLauncher;
 import org.openmrs.module.querystore.bootstrap.BootstrapService;
@@ -30,9 +35,11 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseBody;
 
 /**
@@ -55,6 +62,11 @@ import org.springframework.web.bind.annotation.ResponseBody;
  *   -&gt; 200 {"patient":"&lt;uuid&gt;", "documentsIndexed": 154}
  * POST /ws/rest/v1/querystore/reindex   {"scope":"all"}
  *   -&gt; 202 {"accepted": true}   (then poll indexingstatus)
+ *
+ * POST /ws/rest/v1/querystore/patient/{uuid}/warm     -&gt; 202 {"status": "projecting"}
+ * GET  /ws/rest/v1/querystore/patient/{uuid}/status   -&gt; {"status": "indexed"}
+ * GET  /ws/rest/v1/querystore/patient/{uuid}/recent?limit=5&amp;types=obs
+ * GET  /ws/rest/v1/querystore/patient/{uuid}/search?q=cd4&amp;mode=keyword&amp;collapse=concept&amp;limit=5&amp;wait=false
  * </pre>
  */
 @Controller
@@ -202,6 +214,152 @@ public class QueryStoreRestController {
 		result.put("patient", patientUuid);
 		result.put("documentsIndexed", documentsIndexed);
 		return new ResponseEntity<Object>(result, HttpStatus.OK);
+	}
+
+	// ---------- patient-scoped consumer endpoints (omnibar prototype) ----------
+	//
+	// The patient is always a path segment: there is no cross-patient search and no full-chart
+	// endpoint here (recent is capped at MAX_PAGE). Gated by Get Patients, the privilege the service
+	// methods themselves declare via @Authorized.
+
+	/** Largest page the REST surface serves, so {@code recent} can't become a full-chart dump. */
+	static final int MAX_PAGE = 50;
+
+	/**
+	 * Starts projecting a never-indexed patient in the background and returns at once with
+	 * {@code 202 {"status": "projecting" | "not_indexed"}}, or {@code 200 {"status": "indexed"}} when
+	 * there was nothing to do. Idempotent: an indexed or already-projecting patient starts nothing. {@code not_indexed} means no warm could start (the
+	 * daemon isn't up, or the concurrent-warm cap is reached); the caller may retry.
+	 */
+	@RequestMapping(value = "/patient/{patientUuid}/warm", method = RequestMethod.POST)
+	@ResponseBody
+	public ResponseEntity<Object> warm(@PathVariable("patientUuid") String patientUuid) {
+		Context.requirePrivilege(PrivilegeConstants.GET_PATIENTS);
+		IndexStatus status = queryStoreService().warm(patientUuid);
+		return statusResponse(status, status == IndexStatus.INDEXED ? HttpStatus.OK : HttpStatus.ACCEPTED);
+	}
+
+	/** {@code {"status": "indexed" | "projecting" | "not_indexed"}}. */
+	@RequestMapping(value = "/patient/{patientUuid}/status", method = RequestMethod.GET)
+	@ResponseBody
+	public ResponseEntity<Object> status(@PathVariable("patientUuid") String patientUuid) {
+		Context.requirePrivilege(PrivilegeConstants.GET_PATIENTS);
+		return statusResponse(queryStoreService().getIndexStatus(patientUuid), HttpStatus.OK);
+	}
+
+	/**
+	 * The patient's newest documents: {@code {"status", "hits": [...]}}. Doesn't block on a cold
+	 * patient unless {@code wait=true}; it warms one and answers {@code projecting} with no hits.
+	 */
+	@RequestMapping(value = "/patient/{patientUuid}/recent", method = RequestMethod.GET)
+	@ResponseBody
+	public ResponseEntity<Object> recent(@PathVariable("patientUuid") String patientUuid,
+	        @RequestParam(value = "limit", required = false) Integer limit,
+	        @RequestParam(value = "types", required = false) String types,
+	        @RequestParam(value = "wait", required = false, defaultValue = "false") boolean wait) {
+		Context.requirePrivilege(PrivilegeConstants.GET_PATIENTS);
+		QuerySpec spec = QuerySpec.forPatient(patientUuid).sort(QuerySpec.Sort.RECENT).types(splitTypes(types))
+		        .limit(pageSize(limit, 5)).wait(wait).build();
+		return new ResponseEntity<Object>(queryStoreService().query(spec).toMap(), HttpStatus.OK);
+	}
+
+	/**
+	 * Patient-scoped search; see {@link QuerySpec} for what each parameter does. The body is
+	 * {@link QueryResult#toMap()}: {@code status}, {@code hits}, plus {@code groups} when
+	 * {@code collapse=concept} and {@code facets} when {@code facets=resourceType}. Defaults:
+	 * {@code mode=hybrid}, {@code sort=relevance}, {@code collapse=none}, {@code limit=10},
+	 * {@code offset=0}, {@code wait=true}. An unknown value for any of them is a {@code 400}.
+	 */
+	@RequestMapping(value = "/patient/{patientUuid}/search", method = RequestMethod.GET)
+	@ResponseBody
+	public ResponseEntity<Object> search(@PathVariable("patientUuid") String patientUuid,
+	        @RequestParam(value = "q", required = false) String q,
+	        @RequestParam(value = "mode", required = false) String mode,
+	        @RequestParam(value = "types", required = false) String types,
+	        @RequestParam(value = "sort", required = false) String sort,
+	        @RequestParam(value = "collapse", required = false) String collapse,
+	        @RequestParam(value = "facets", required = false) String facets,
+	        @RequestParam(value = "limit", required = false) Integer limit,
+	        @RequestParam(value = "offset", required = false) Integer offset,
+	        @RequestParam(value = "wait", required = false, defaultValue = "true") boolean wait) {
+		Context.requirePrivilege(PrivilegeConstants.GET_PATIENTS);
+		if (StringUtils.isBlank(q)) {
+			throw new BadParameterException("q is required");
+		}
+		QuerySpec.Builder spec = QuerySpec.forPatient(patientUuid).query(q)
+		        .mode(parse(QuerySpec.Mode.class, "mode", mode, QuerySpec.Mode.HYBRID))
+		        .sort(parse(QuerySpec.Sort.class, "sort", sort, QuerySpec.Sort.RELEVANCE))
+		        .collapse(parse(QuerySpec.Collapse.class, "collapse", collapse, QuerySpec.Collapse.NONE))
+		        .types(splitTypes(types)).limit(pageSize(limit, QuerySpec.DEFAULT_LIMIT)).wait(wait);
+		if (offset != null) {
+			if (offset < 0) {
+				throw new BadParameterException("offset must not be negative");
+			}
+			spec.offset(offset);
+		}
+		for (String facet : splitTypes(facets)) {
+			if (!"resourceType".equals(facet)) {
+				throw new BadParameterException("Unknown facet '" + facet + "'; supported: resourceType");
+			}
+			spec.facet(QuerySpec.Facet.RESOURCE_TYPE);
+		}
+		return new ResponseEntity<Object>(queryStoreService().query(spec.build()).toMap(), HttpStatus.OK);
+	}
+
+	private static ResponseEntity<Object> statusResponse(IndexStatus status, HttpStatus httpStatus) {
+		Map<String, Object> body = new HashMap<String, Object>();
+		body.put("status", status.wireName());
+		return new ResponseEntity<Object>(body, httpStatus);
+	}
+
+	private static int pageSize(Integer limit, int defaultLimit) {
+		if (limit == null) {
+			return defaultLimit;
+		}
+		if (limit <= 0 || limit > MAX_PAGE) {
+			throw new BadParameterException("limit must be between 1 and " + MAX_PAGE);
+		}
+		return limit;
+	}
+
+	private static List<String> splitTypes(String csv) {
+		List<String> out = new ArrayList<String>();
+		if (csv != null) {
+			for (String part : csv.split(",")) {
+				if (StringUtils.isNotBlank(part)) {
+					out.add(part.trim());
+				}
+			}
+		}
+		return out;
+	}
+
+	private static <E extends Enum<E>> E parse(Class<E> type, String name, String value, E defaultValue) {
+		if (StringUtils.isBlank(value)) {
+			return defaultValue;
+		}
+		for (E constant : type.getEnumConstants()) {
+			if (constant.name().equalsIgnoreCase(value.trim())) {
+				return constant;
+			}
+		}
+		throw new BadParameterException("Unknown " + name + " '" + value + "'");
+	}
+
+	/** A request parameter the endpoint can't honour; its message is safe to return to the caller. */
+	static final class BadParameterException extends RuntimeException {
+
+		private static final long serialVersionUID = 1L;
+
+		BadParameterException(String message) {
+			super(message);
+		}
+	}
+
+	@ExceptionHandler(BadParameterException.class)
+	@ResponseBody
+	public ResponseEntity<Object> handleBadParameter(BadParameterException e) {
+		return errorResponse(HttpStatus.BAD_REQUEST, e.getMessage());
 	}
 
 	/** Non-null only when a test injects a launcher via {@link #setBootstrapLauncher}; production
