@@ -1,0 +1,71 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public License,
+ * v. 2.0. If a copy of the MPL was not distributed with this file, You can
+ * obtain one at http://mozilla.org/MPL/2.0/. OpenMRS is also distributed under
+ * the terms of the Healthcare Disclaimer located at http://openmrs.org/license.
+ *
+ * Copyright (C) OpenMRS Inc. OpenMRS is a registered trademark and the OpenMRS
+ * graphic logo is a trademark of OpenMRS Inc.
+ */
+package org.openmrs.module.querystore;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import org.junit.Test;
+
+/**
+ * WARN reaches production logs by default, so no WARN line may carry a patient's or an encounter's
+ * uuid (those go to DEBUG, like the [QSEVAL] lines). This scans every {@code log.warn(...)} statement
+ * in the api and omod sources for a variable that holds one; a record named by type and uuid goes
+ * through {@link SkipLogFormat#loggableUuid}, which omits the identifying types.
+ */
+public class WarnLogHygieneTest {
+
+	private static final Pattern WARN_STATEMENT = Pattern.compile("log\\.warn\\((.*?)\\);", Pattern.DOTALL);
+
+	private static final Pattern IDENTIFYING_VARIABLE = Pattern.compile("(?i)\\b\\w*(patient|encounter)uuid\\w*\\b");
+
+	@Test
+	public void noWarnStatementLogsAPatientOrEncounterUuid() throws IOException {
+		List<Path> roots = new ArrayList<>();
+		for (String root : new String[] { "src/main/java", "../omod/src/main/java" }) {
+			if (Files.isDirectory(Paths.get(root))) {
+				roots.add(Paths.get(root));
+			}
+		}
+		assertTrue("expected to run from the api module directory", !roots.isEmpty());
+
+		List<String> offenders = new ArrayList<>();
+		int scanned = 0;
+		for (Path root : roots) {
+			List<Path> files;
+			try (Stream<Path> walk = Files.walk(root)) {
+				files = walk.filter(p -> p.toString().endsWith(".java")).collect(Collectors.toList());
+			}
+			for (Path file : files) {
+				Matcher warn = WARN_STATEMENT.matcher(new String(Files.readAllBytes(file), StandardCharsets.UTF_8));
+				while (warn.find()) {
+					scanned++;
+					if (IDENTIFYING_VARIABLE.matcher(warn.group(1)).find()) {
+						offenders.add(file.getFileName() + ": log.warn(" + warn.group(1).replaceAll("\\s+", " ") + ")");
+					}
+				}
+			}
+		}
+		assertTrue("the scan found no WARN statements, so it isn't scanning anything", scanned > 20);
+		assertEquals("WARN statements that log a patient or encounter uuid", new ArrayList<String>(), offenders);
+	}
+}

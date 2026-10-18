@@ -202,7 +202,8 @@ public abstract class TypeBootstrapper<T> {
 			fast = fetchPage(cursor, cursorUuid, pageSize);
 		}
 		catch (RuntimeException e) {
-			log.warn("Page fetch failed for " + getResourceType() + " at cursor " + cursor + "/" + cursorUuid
+			log.warn("Page fetch failed for " + getResourceType() + " at cursor " + cursor + "/"
+			        + SkipLogFormat.loggableUuid(getResourceType(), cursorUuid)
 			        + "; falling back to per-row fetch to skip dump-orphaned record(s)", e);
 			return fetchPageSkippingPoison(cursor, cursorUuid, pageSize, e);
 		}

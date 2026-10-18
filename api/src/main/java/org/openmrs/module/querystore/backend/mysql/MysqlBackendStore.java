@@ -35,6 +35,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.openmrs.api.db.hibernate.DbSessionFactory;
+import org.openmrs.module.querystore.SkipLogFormat;
 import org.openmrs.module.querystore.backend.BackendCapabilities;
 import org.openmrs.module.querystore.backend.BackendDocs;
 import org.openmrs.module.querystore.backend.BackendStore;
@@ -125,7 +126,8 @@ public class MysqlBackendStore implements BackendStore {
 				return WriteResult.success();
 			}
 			catch (SQLException e) {
-				log.warn("upsert failed for " + doc.getResourceType() + "/" + doc.getResourceUuid(), e);
+				log.warn("upsert failed for " + doc.getResourceType() + "/"
+				        + SkipLogFormat.loggableUuid(doc.getResourceType(), doc.getResourceUuid()), e);
 				return WriteResult.failed(new DocFailure(doc.getResourceType(), doc.getResourceUuid(),
 				        e.getMessage(), isRetryable(e)));
 			}
@@ -142,7 +144,7 @@ public class MysqlBackendStore implements BackendStore {
 				return WriteResult.success();
 			}
 			catch (SQLException e) {
-				log.warn("delete failed for " + resourceType + "/" + resourceUuid, e);
+				log.warn("delete failed for " + resourceType + "/" + SkipLogFormat.loggableUuid(resourceType, resourceUuid), e);
 				return WriteResult.failed(new DocFailure(resourceType, resourceUuid, e.getMessage(), isRetryable(e)));
 			}
 		});
@@ -253,7 +255,7 @@ public class MysqlBackendStore implements BackendStore {
 			});
 		}
 		catch (RuntimeException e) {
-			log.warn("existsByPatient could not acquire session for " + patientUuid, e);
+			log.warn("existsByPatient could not acquire session", e);
 			return false;
 		}
 	}
@@ -322,7 +324,7 @@ public class MysqlBackendStore implements BackendStore {
 			});
 		}
 		catch (RuntimeException e) {
-			log.warn("findAllByPatient could not acquire session for " + patientUuid, e);
+			log.warn("findAllByPatient could not acquire session", e);
 			return Collections.emptyList();
 		}
 		all.sort(BackendDocs.CHART_ORDER);

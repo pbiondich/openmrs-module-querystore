@@ -218,8 +218,9 @@ public class BootstrapServiceImpl extends BaseOpenmrsService implements Bootstra
 				}
 			}
 			catch (RuntimeException e) {
-				log.warn("Per-patient projection of " + resourceType + " for patient " + patientUuid
-				        + " failed; continuing with remaining types", e);
+				log.warn("Per-patient projection of " + resourceType
+				        + " failed; continuing with remaining types (patient uuid at DEBUG)", e);
+				log.debug("Per-patient projection of " + resourceType + " failed for patient " + patientUuid);
 			}
 		}
 	}

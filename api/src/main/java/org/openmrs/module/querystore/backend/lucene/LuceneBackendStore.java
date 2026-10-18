@@ -57,6 +57,7 @@ import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.util.BytesRef;
 import org.openmrs.module.querystore.QueryStoreConstants;
+import org.openmrs.module.querystore.SkipLogFormat;
 import org.openmrs.module.querystore.backend.BackendCapabilities;
 import org.openmrs.module.querystore.backend.BackendDocs;
 import org.openmrs.module.querystore.backend.BackendStore;
@@ -149,7 +150,8 @@ public class LuceneBackendStore implements BackendStore, Closeable {
 			return WriteResult.success();
 		}
 		catch (IOException e) {
-			log.warn("upsert failed for " + doc.getResourceType() + "/" + doc.getResourceUuid(), e);
+			log.warn("upsert failed for " + doc.getResourceType() + "/"
+			        + SkipLogFormat.loggableUuid(doc.getResourceType(), doc.getResourceUuid()), e);
 			return WriteResult.failed(failure(doc.getResourceType(), doc.getResourceUuid(), e));
 		}
 	}
@@ -163,7 +165,7 @@ public class LuceneBackendStore implements BackendStore, Closeable {
 			return WriteResult.success();
 		}
 		catch (IOException e) {
-			log.warn("delete failed for " + resourceType + "/" + resourceUuid, e);
+			log.warn("delete failed for " + resourceType + "/" + SkipLogFormat.loggableUuid(resourceType, resourceUuid), e);
 			return WriteResult.failed(failure(resourceType, resourceUuid, e));
 		}
 	}
@@ -538,7 +540,8 @@ public class LuceneBackendStore implements BackendStore, Closeable {
 				applied.add(doc);
 			}
 			catch (IOException e) {
-				log.warn("bulkUpsert doc failed for " + resourceType + "/" + doc.getResourceUuid(), e);
+				log.warn("bulkUpsert doc failed for " + resourceType + "/"
+				        + SkipLogFormat.loggableUuid(resourceType, doc.getResourceUuid()), e);
 				failures.add(failure(resourceType, doc.getResourceUuid(), e));
 			}
 		}

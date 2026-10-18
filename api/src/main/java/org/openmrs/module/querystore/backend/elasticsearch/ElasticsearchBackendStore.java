@@ -24,6 +24,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.openmrs.module.querystore.QueryStoreConstants;
+import org.openmrs.module.querystore.SkipLogFormat;
 import org.openmrs.module.querystore.backend.BackendCapabilities;
 import org.openmrs.module.querystore.backend.BackendDocs;
 import org.openmrs.module.querystore.backend.BackendStore;
@@ -138,7 +139,8 @@ public class ElasticsearchBackendStore implements BackendStore, Closeable {
 				// The SPI does not distinguish "applied" from "dropped as stale" — both succeed.
 				return WriteResult.success();
 			}
-			log.warn("upsert failed for " + doc.getResourceType() + "/" + doc.getResourceUuid(), e);
+			log.warn("upsert failed for " + doc.getResourceType() + "/"
+			        + SkipLogFormat.loggableUuid(doc.getResourceType(), doc.getResourceUuid()), e);
 			return WriteResult.failed(failure(doc, e));
 		}
 		catch (IOException e) {
@@ -148,7 +150,8 @@ public class ElasticsearchBackendStore implements BackendStore, Closeable {
 			if (isVersionConflict(e)) {
 				return WriteResult.success();
 			}
-			log.warn("upsert failed for " + doc.getResourceType() + "/" + doc.getResourceUuid(), e);
+			log.warn("upsert failed for " + doc.getResourceType() + "/"
+			        + SkipLogFormat.loggableUuid(doc.getResourceType(), doc.getResourceUuid()), e);
 			return WriteResult.failed(failure(doc, e));
 		}
 	}
@@ -165,11 +168,11 @@ public class ElasticsearchBackendStore implements BackendStore, Closeable {
 				// Idempotent delete: missing doc or missing index is the second-call no-op outcome.
 				return WriteResult.success();
 			}
-			log.warn("delete failed for " + resourceType + "/" + resourceUuid, e);
+			log.warn("delete failed for " + resourceType + "/" + SkipLogFormat.loggableUuid(resourceType, resourceUuid), e);
 			return WriteResult.failed(new DocFailure(resourceType, resourceUuid, e.getMessage(), isRetryable(e)));
 		}
 		catch (IOException e) {
-			log.warn("delete failed for " + resourceType + "/" + resourceUuid, e);
+			log.warn("delete failed for " + resourceType + "/" + SkipLogFormat.loggableUuid(resourceType, resourceUuid), e);
 			return WriteResult.failed(new DocFailure(resourceType, resourceUuid, e.getMessage(), isRetryable(e)));
 		}
 	}
@@ -246,7 +249,7 @@ public class ElasticsearchBackendStore implements BackendStore, Closeable {
 			}
 		}
 		catch (ElasticsearchException | IOException e) {
-			log.warn("bulkDeleteByPatient failed for " + patientUuid, e);
+			log.warn("bulkDeleteByPatient failed", e);
 			// Call-level failure: no per-doc telemetry available, so resourceType/resourceUuid stay
 			// null. totalRequested stays 0 — the call didn't get far enough to know.
 			failures.add(new DocFailure(null, null, e.getMessage(), isRetryable(e)));
@@ -304,7 +307,7 @@ public class ElasticsearchBackendStore implements BackendStore, Closeable {
 				// they stream from JDBC/Lucene directly. PIT+search_after pagination is the v1.1
 				// follow-up if a real consumer ever surfaces here. See ADR Decision 15 for the v1
 				// contract; the log message itself stays terse for ops dashboards.
-				log.warn("findAllByPatient(" + patientUuid + ") returned the ES v1 cap of "
+				log.warn("findAllByPatient returned the ES v1 cap of "
 				        + FULL_CHART_MAX_HITS + " hits; older records beyond this slice are not in"
 				        + " the result.");
 			}
@@ -321,7 +324,7 @@ public class ElasticsearchBackendStore implements BackendStore, Closeable {
 			// while an empty list lets the prompt fall back to its own absent-data handling. Tier-
 			// specific divergence from the MySQL/Lucene "partial-per-store" tolerance — see the SPI
 			// Javadoc on {@link BackendStore#findAllByPatient} for the contract that pins both shapes.
-			log.warn("findAllByPatient failed for " + patientUuid, e);
+			log.warn("findAllByPatient failed", e);
 			return Collections.emptyList();
 		}
 	}
@@ -350,7 +353,7 @@ public class ElasticsearchBackendStore implements BackendStore, Closeable {
 			return resp.count() > 0L;
 		}
 		catch (ElasticsearchException | IOException e) {
-			log.warn("existsByPatient failed for " + patientUuid, e);
+			log.warn("existsByPatient failed", e);
 			return false;
 		}
 	}
