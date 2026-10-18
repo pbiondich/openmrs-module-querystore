@@ -25,6 +25,8 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.openmrs.api.context.Context;
 import org.openmrs.api.impl.BaseOpenmrsService;
+import org.openmrs.module.querystore.SafeLog;
+import org.openmrs.module.querystore.SkipLogFormat;
 import org.openmrs.module.querystore.api.QueryStoreService;
 import org.openmrs.module.querystore.backend.BackendStore;
 import org.openmrs.module.querystore.backend.BackendStoreSelector;
@@ -131,7 +133,7 @@ public class BootstrapServiceImpl extends BaseOpenmrsService implements Bootstra
 				runOne(resourceType, providers, false);
 			}
 			catch (RuntimeException e) {
-				log.warn("Bootstrap of " + resourceType + " failed; continuing with remaining types", e);
+				SafeLog.warn(log, "Bootstrap of " + resourceType + " failed; continuing with remaining types", e);
 			}
 		}
 	}
@@ -218,7 +220,7 @@ public class BootstrapServiceImpl extends BaseOpenmrsService implements Bootstra
 				}
 			}
 			catch (RuntimeException e) {
-				log.warn("Per-patient projection of " + resourceType
+				SafeLog.warn(log, "Per-patient projection of " + resourceType
 				        + " failed; continuing with remaining types (patient uuid at DEBUG)", e);
 				log.debug("Per-patient projection of " + resourceType + " failed for patient " + patientUuid);
 			}
@@ -270,7 +272,7 @@ public class BootstrapServiceImpl extends BaseOpenmrsService implements Bootstra
 			return counter.getAsLong();
 		}
 		catch (RuntimeException e) {
-			log.warn(operation + " failed for resource type '" + resourceType
+			SafeLog.warn(log, operation + " failed for resource type '" + resourceType
 			        + "'; reporting its drift as unknown", e);
 			return -1L;
 		}
@@ -444,7 +446,7 @@ public class BootstrapServiceImpl extends BaseOpenmrsService implements Bootstra
 			catch (RuntimeException e) {
 				log.warn("Skipping malformed ResourceTypeProvider bean " + p.getClass().getName()
 				        + (name != null ? " (resource type '" + name + "')" : "")
-				        + " — " + e.getMessage());
+				        + " — " + SkipLogFormat.scrubUuids(e.getMessage()));
 			}
 		}
 		return accepted;

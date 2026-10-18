@@ -29,6 +29,7 @@ import org.apache.commons.logging.LogFactory;
 import org.openmrs.api.context.Context;
 import org.openmrs.api.impl.BaseOpenmrsService;
 import org.openmrs.module.querystore.QueryStoreConstants;
+import org.openmrs.module.querystore.SafeLog;
 import org.openmrs.module.querystore.api.IndexStatus;
 import org.openmrs.module.querystore.api.QueryResult;
 import org.openmrs.module.querystore.api.QuerySpec;
@@ -249,7 +250,7 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 			// Index-failure must not block search; whatever did get indexed (or what was already
 			// present) is still searchable. Empty results are the same outcome as before this
 			// feature shipped.
-			log.warn("Auto-index for a cold patient failed; serving search with whatever is indexed", e);
+			SafeLog.warn(log, "Auto-index for a cold patient failed; serving search with whatever is indexed", e);
 			log.debug("Auto-index failed for patient " + patientUuid);
 		}
 	}

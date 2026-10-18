@@ -113,6 +113,11 @@ public final class SkipLogFormat {
 		return sb.toString();
 	}
 
+	/** Replaces every uuid in {@code text} with {@code <uuid>}; null stays null. */
+	public static String scrubUuids(String text) {
+		return text == null ? null : UUID_PATTERN.matcher(text).replaceAll("<uuid>");
+	}
+
 	/**
 	 * Keeps each emitted skip event on one log4j entry with balanced quoting, and keeps uuids out of
 	 * the free-text reason (the structured {@code uuid=} field says which record). Stack traces ride
@@ -123,7 +128,6 @@ public final class SkipLogFormat {
 			return "no failure detail";
 		}
 		// A backend or Hibernate message can quote any uuid, a patient's included.
-		return UUID_PATTERN.matcher(reason).replaceAll("<uuid>").replace('\n', ' ').replace('\r', ' ')
-		        .replace('"', '\'');
+		return scrubUuids(reason).replace('\n', ' ').replace('\r', ' ').replace('"', '\'');
 	}
 }

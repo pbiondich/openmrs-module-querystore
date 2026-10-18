@@ -36,6 +36,10 @@ public class WarnLogHygieneTest {
 
 	private static final Pattern WARN_STATEMENT = Pattern.compile("log\\.warn\\((.*?)\\);", Pattern.DOTALL);
 
+	private static final Pattern WARN_OR_ERROR_STATEMENT = Pattern.compile("log\\.(warn|error)\\((.*?)\\);", Pattern.DOTALL);
+
+	private static final Pattern CATCH_PARAMETER = Pattern.compile("catch\\s*\\([^)]*?\\b(\\w+)\\s*\\)");
+
 	private static final Pattern IDENTIFYING_VARIABLE = Pattern.compile("(?i)\\b\\w*(patient|encounter)uuid\\w*\\b");
 
 	@Test
@@ -67,5 +71,51 @@ public class WarnLogHygieneTest {
 		}
 		assertTrue("the scan found no WARN statements, so it isn't scanning anything", scanned > 20);
 		assertEquals("WARN statements that log a patient or encounter uuid", new ArrayList<String>(), offenders);
+	}
+
+	/**
+	 * A WARN or ERROR line must not carry an exception's stack or raw message: either can quote any
+	 * uuid. Failures go through {@link SafeLog}, which scrubs the message and puts the stack at DEBUG;
+	 * a message spliced into the text goes through {@link SkipLogFormat#scrubUuids} (or
+	 * {@link SkipLogFormat#format}, which scrubs its reason).
+	 */
+	@Test
+	public void noWarnOrErrorStatementCarriesARawException() throws IOException {
+		List<String> offenders = new ArrayList<>();
+		int scanned = 0;
+		for (Path file : sourceFiles()) {
+			String source = new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
+			List<String> catchParameters = new ArrayList<>();
+			Matcher c = CATCH_PARAMETER.matcher(source);
+			while (c.find()) {
+				catchParameters.add(c.group(1));
+			}
+			Matcher statement = WARN_OR_ERROR_STATEMENT.matcher(source);
+			while (statement.find()) {
+				scanned++;
+				String args = statement.group(2);
+				String last = args.contains(",") ? args.substring(args.lastIndexOf(',') + 1).trim() : "";
+				boolean passesException = catchParameters.contains(last);
+				boolean splicesRawMessage = args.contains("getMessage()") && !args.contains("scrubUuids(")
+				        && !args.contains("SkipLogFormat.format(");
+				if (passesException || splicesRawMessage) {
+					offenders.add(file.getFileName() + ": log." + statement.group(1) + "(" + args.replaceAll("\\s+", " ") + ")");
+				}
+			}
+		}
+		assertTrue("the scan found no WARN or ERROR statements, so it isn't scanning anything", scanned > 20);
+		assertEquals("WARN/ERROR statements that carry a raw exception; use SafeLog", new ArrayList<String>(), offenders);
+	}
+
+	private static List<Path> sourceFiles() throws IOException {
+		List<Path> files = new ArrayList<>();
+		for (String root : new String[] { "src/main/java", "../omod/src/main/java" }) {
+			if (Files.isDirectory(Paths.get(root))) {
+				try (Stream<Path> walk = Files.walk(Paths.get(root))) {
+					walk.filter(p -> p.toString().endsWith(".java")).forEach(files::add);
+				}
+			}
+		}
+		return files;
 	}
 }

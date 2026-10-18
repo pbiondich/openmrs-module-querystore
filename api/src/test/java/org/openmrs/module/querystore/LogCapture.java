@@ -23,11 +23,15 @@ import org.apache.logging.log4j.core.config.LoggerConfig;
 import org.apache.logging.log4j.core.config.Property;
 
 /**
- * Captures what one class logs, at {@code DEBUG} and above, for the duration of a test. The test
+ * Captures what one class logs, at {@code DEBUG} and above, for the duration of a test. A line whose
+ * event carried a throwable ends with {@link #THROWN}. The test
  * log4j2 config turns the root logger off, so this adds a logger config for the class with its own
  * appender and removes it on {@link #close()}.
  */
 public final class LogCapture implements AutoCloseable {
+
+	/** Appended to a captured line whose event carried a throwable. */
+	public static final String THROWN = " <thrown>";
 
 	private final List<String> lines = new CopyOnWriteArrayList<>();
 
@@ -41,7 +45,8 @@ public final class LogCapture implements AutoCloseable {
 
 			@Override
 			public void append(LogEvent event) {
-				lines.add(event.getLevel() + " " + event.getMessage().getFormattedMessage());
+				lines.add(event.getLevel() + " " + event.getMessage().getFormattedMessage()
+				        + (event.getThrown() != null ? THROWN : ""));
 			}
 		};
 		appender.start();

@@ -15,6 +15,7 @@ import java.util.List;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.openmrs.BaseOpenmrsData;
+import org.openmrs.module.querystore.SafeLog;
 import org.openmrs.module.querystore.SkipLogFormat;
 import org.openmrs.module.querystore.model.QueryDocument;
 import org.openmrs.module.querystore.serialization.ClinicalRecordSerializer;
@@ -80,7 +81,7 @@ public final class RecordProjector {
 					indexer.index(doc);
 				}
 				catch (RuntimeException e) {
-					log.warn("Skipping index for " + resourceType + "/"
+					SafeLog.warn(log, "Skipping index for " + resourceType + "/"
 					        + SkipLogFormat.loggableUuid(resourceType, doc.getResourceUuid())
 					        + " due to failure", e);
 				}
@@ -90,7 +91,7 @@ public final class RecordProjector {
 					indexer.delete(resourceType, uuid);
 				}
 				catch (RuntimeException e) {
-					log.warn("Skipping delete for " + resourceType + "/" + SkipLogFormat.loggableUuid(resourceType, uuid)
+					SafeLog.warn(log, "Skipping delete for " + resourceType + "/" + SkipLogFormat.loggableUuid(resourceType, uuid)
 					        + " due to failure", e);
 				}
 			}
@@ -99,7 +100,7 @@ public final class RecordProjector {
 					indexer.bulkDeleteByPatient(bulkDeletePatientUuid);
 				}
 				catch (RuntimeException e) {
-					log.warn("Skipping bulk-delete-by-patient due to failure", e);
+					SafeLog.warn(log, "Skipping bulk-delete-by-patient due to failure", e);
 				}
 			}
 		});

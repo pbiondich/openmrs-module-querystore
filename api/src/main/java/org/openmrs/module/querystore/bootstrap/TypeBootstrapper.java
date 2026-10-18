@@ -17,6 +17,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.openmrs.BaseOpenmrsData;
 import org.openmrs.OpenmrsObject;
+import org.openmrs.module.querystore.SafeLog;
 import org.openmrs.module.querystore.SkipLogFormat;
 import org.openmrs.module.querystore.api.QueryStoreService;
 import org.openmrs.module.querystore.backend.BulkWriteResult;
@@ -148,7 +149,7 @@ public abstract class TypeBootstrapper<T> {
 			progressDao.save(progress);
 		}
 		catch (RuntimeException e) {
-			log.warn("Bootstrap failed for " + getResourceType() + " at cursor "
+			SafeLog.warn(log, "Bootstrap failed for " + getResourceType() + " at cursor "
 			        + progress.getCursorDateChanged() + "/" + progress.getCursorUuid(), e);
 			progress.setStatus(BootstrapStatus.FAILED);
 			// Include the exception class so a null-message failure (NPE, ISE) is still identifiable
@@ -202,7 +203,7 @@ public abstract class TypeBootstrapper<T> {
 			fast = fetchPage(cursor, cursorUuid, pageSize);
 		}
 		catch (RuntimeException e) {
-			log.warn("Page fetch failed for " + getResourceType() + " at cursor " + cursor + "/"
+			SafeLog.warn(log, "Page fetch failed for " + getResourceType() + " at cursor " + cursor + "/"
 			        + SkipLogFormat.loggableUuid(getResourceType(), cursorUuid)
 			        + "; falling back to per-row fetch to skip dump-orphaned record(s)", e);
 			return fetchPageSkippingPoison(cursor, cursorUuid, pageSize, e);
@@ -269,7 +270,7 @@ public abstract class TypeBootstrapper<T> {
 		}
 		catch (RuntimeException e) {
 			// retryable=null → "unknown": a thrown exception, not a DocFailure-bearing WriteResult.
-			log.warn(SkipLogFormat.format("bootstrap", getResourceType(), getUuid(entity),
+			SafeLog.warn(log, SkipLogFormat.format("bootstrap", getResourceType(), getUuid(entity),
 			        null, e.getMessage()), e);
 			return null;
 		}

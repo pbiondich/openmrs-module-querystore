@@ -94,7 +94,7 @@ public class QueryStoreActivator extends BaseModuleActivator implements DaemonTo
 				log.info("Query embedder warmup completed in " + (System.currentTimeMillis() - t0) + " ms");
 			}
 			catch (RuntimeException e) {
-				log.warn("Query embedder warmup failed; first real query will pay cold cost", e);
+				SafeLog.warn(log, "Query embedder warmup failed; first real query will pay cold cost", e);
 			}
 		}, daemonToken);
 	}

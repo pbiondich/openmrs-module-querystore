@@ -18,6 +18,7 @@ import org.apache.commons.logging.LogFactory;
 import org.openmrs.api.context.Context;
 import org.openmrs.api.context.Daemon;
 import org.openmrs.module.DaemonToken;
+import org.openmrs.module.querystore.SafeLog;
 
 /**
  * Single home for "run the global {@link BootstrapService#bootstrap()} on an OpenMRS daemon thread".
@@ -150,7 +151,7 @@ public class BootstrapLauncher {
 			catch (RuntimeException e) {
 				// Fire-and-forget on a daemon thread — no caller upstack to surface to, so log here
 				// (mirrors the after-commit sync path's log-and-swallow per ADR Decision 12).
-				log.error("Type re-sync failed for " + resourceType, e);
+				SafeLog.error(log, "Type re-sync failed for " + resourceType, e);
 			}
 		}, token);
 		return true;
@@ -201,7 +202,7 @@ public class BootstrapLauncher {
 				catch (RuntimeException e) {
 					// Fire-and-forget: no caller upstack, so the failure is kept for the status read.
 					failedPatients.add(patientUuid);
-					log.warn("Background patient warm failed (patient uuid at DEBUG)", e);
+					SafeLog.warn(log, "Background patient warm failed (patient uuid at DEBUG)", e);
 					log.debug("Background warm failed for patient " + patientUuid);
 				}
 				finally {

@@ -19,6 +19,7 @@ import org.openmrs.api.APIAuthenticationException;
 import org.openmrs.api.APIException;
 import org.openmrs.api.context.Context;
 import org.openmrs.api.context.ContextAuthenticationException;
+import org.openmrs.module.querystore.SafeLog;
 import org.openmrs.module.querystore.api.IndexStatus;
 import org.openmrs.module.querystore.api.QueryResult;
 import org.openmrs.module.querystore.api.QuerySpec;
@@ -446,7 +447,7 @@ public class QueryStoreRestController {
 	@ExceptionHandler(Exception.class)
 	@ResponseBody
 	public ResponseEntity<Object> handleUnexpected(Exception e) {
-		log.error("Unexpected error handling a querystore REST request", e);
+		SafeLog.error(log, "Unexpected error handling a querystore REST request", e);
 		return errorResponse(HttpStatus.INTERNAL_SERVER_ERROR, "Internal error");
 	}
 

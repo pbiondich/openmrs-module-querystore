@@ -25,6 +25,7 @@ import org.openmrs.aop.event.UnvoidServiceEvent;
 import org.openmrs.aop.event.VoidServiceEvent;
 import org.openmrs.api.context.Context;
 import org.openmrs.person.PersonMergeLog;
+import org.openmrs.module.querystore.SafeLog;
 import org.openmrs.module.querystore.bootstrap.BootstrapService;
 import org.openmrs.module.querystore.model.QueryDocument;
 import org.openmrs.module.querystore.sync.AfterCommitDispatcher;
@@ -123,7 +124,7 @@ public class CoreServiceEventListener {
 		catch (RuntimeException e) {
 			// Best-effort per ADR Decision 12: a projection failure must not
 			// propagate back into the clinical transaction that published the event.
-			log.warn("Events consumer failed projecting " + data.getClass().getSimpleName()
+			SafeLog.warn(log, "Events consumer failed projecting " + data.getClass().getSimpleName()
 			        + "; swallowing per ADR Decision 12", e);
 		}
 	}
@@ -197,7 +198,7 @@ public class CoreServiceEventListener {
 					}
 				}
 				catch (RuntimeException e) {
-					log.warn("Skipping reconcile for obs/" + uuid + " due to failure", e);
+					SafeLog.warn(log, "Skipping reconcile for obs/" + uuid + " due to failure", e);
 				}
 			}
 		});

@@ -35,6 +35,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.openmrs.api.db.hibernate.DbSessionFactory;
+import org.openmrs.module.querystore.SafeLog;
 import org.openmrs.module.querystore.SkipLogFormat;
 import org.openmrs.module.querystore.backend.BackendCapabilities;
 import org.openmrs.module.querystore.backend.BackendDocs;
@@ -126,7 +127,7 @@ public class MysqlBackendStore implements BackendStore {
 				return WriteResult.success();
 			}
 			catch (SQLException e) {
-				log.warn("upsert failed for " + doc.getResourceType() + "/"
+				SafeLog.warn(log, "upsert failed for " + doc.getResourceType() + "/"
 				        + SkipLogFormat.loggableUuid(doc.getResourceType(), doc.getResourceUuid()), e);
 				return WriteResult.failed(new DocFailure(doc.getResourceType(), doc.getResourceUuid(),
 				        e.getMessage(), isRetryable(e)));
@@ -144,7 +145,7 @@ public class MysqlBackendStore implements BackendStore {
 				return WriteResult.success();
 			}
 			catch (SQLException e) {
-				log.warn("delete failed for " + resourceType + "/" + SkipLogFormat.loggableUuid(resourceType, resourceUuid), e);
+				SafeLog.warn(log, "delete failed for " + resourceType + "/" + SkipLogFormat.loggableUuid(resourceType, resourceUuid), e);
 				return WriteResult.failed(new DocFailure(resourceType, resourceUuid, e.getMessage(), isRetryable(e)));
 			}
 		});
@@ -183,7 +184,7 @@ public class MysqlBackendStore implements BackendStore {
 				}
 			}
 			catch (SQLException e) {
-				log.warn("bulkDelete failed for " + resourceType, e);
+				SafeLog.warn(log, "bulkDelete failed for " + resourceType, e);
 				for (String uuid : resourceUuids) {
 					failures.add(new DocFailure(resourceType, uuid, e.getMessage(), isRetryable(e)));
 				}
@@ -212,7 +213,7 @@ public class MysqlBackendStore implements BackendStore {
 				});
 			}
 			catch (RuntimeException e) {
-				log.warn("bulkDeleteByPatient failed for table " + table, e);
+				SafeLog.warn(log, "bulkDeleteByPatient failed for table " + table, e);
 				failures.add(new DocFailure(BackendDocs.stripPrefix(table), patientUuid, e.getMessage(),
 				        isRetryableCause(e)));
 			}
@@ -248,14 +249,14 @@ public class MysqlBackendStore implements BackendStore {
 					catch (SQLException e) {
 						// One table failing (locked, schema mid-migration) should not poison the probe; the
 						// auto-index caller's contract is "missing data triggers indexing, which converges."
-						log.warn("existsByPatient probe failed for table " + table, e);
+						SafeLog.warn(log, "existsByPatient probe failed for table " + table, e);
 					}
 				}
 				return false;
 			});
 		}
 		catch (RuntimeException e) {
-			log.warn("existsByPatient could not acquire session", e);
+			SafeLog.warn(log, "existsByPatient could not acquire session", e);
 			return false;
 		}
 	}
@@ -276,13 +277,13 @@ public class MysqlBackendStore implements BackendStore {
 					return rs.next() ? rs.getLong(1) : 0L;
 				}
 				catch (SQLException e) {
-					log.warn("countByType failed for " + resourceType, e);
+					SafeLog.warn(log, "countByType failed for " + resourceType, e);
 					return -1L;
 				}
 			});
 		}
 		catch (RuntimeException e) {
-			log.warn("countByType could not acquire session for " + resourceType, e);
+			SafeLog.warn(log, "countByType could not acquire session for " + resourceType, e);
 			return -1L;
 		}
 	}
@@ -317,14 +318,14 @@ public class MysqlBackendStore implements BackendStore {
 						// One table failing should not strand the LLM caller — partial chart is
 						// preferable to a thrown call. Matches existsByPatient's table-isolation
 						// stance: missing data converges to indexing on the next probe.
-						log.warn("findAllByPatient probe failed for table " + table, e);
+						SafeLog.warn(log, "findAllByPatient probe failed for table " + table, e);
 					}
 				}
 				return null;
 			});
 		}
 		catch (RuntimeException e) {
-			log.warn("findAllByPatient could not acquire session", e);
+			SafeLog.warn(log, "findAllByPatient could not acquire session", e);
 			return Collections.emptyList();
 		}
 		all.sort(BackendDocs.CHART_ORDER);
@@ -402,7 +403,7 @@ public class MysqlBackendStore implements BackendStore {
 				}
 			}
 			catch (SQLException e) {
-				log.warn("bulkUpsert failed for " + resourceType, e);
+				SafeLog.warn(log, "bulkUpsert failed for " + resourceType, e);
 				for (QueryDocument doc : docs) {
 					failures.add(new DocFailure(resourceType, doc.getResourceUuid(), e.getMessage(),
 					        isRetryable(e)));

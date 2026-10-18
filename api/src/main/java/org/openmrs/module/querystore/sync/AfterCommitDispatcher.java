@@ -17,6 +17,7 @@ import org.openmrs.api.context.Daemon;
 import org.openmrs.module.DaemonToken;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.openmrs.module.querystore.SafeLog;
 
 /**
  * Hands a projection task to the {@link SyncExecutor} once the originating transaction has
@@ -81,7 +82,7 @@ public class AfterCommitDispatcher {
 				// conditional-upsert-by-version invariant (ADR Decision 3) means a missed
 				// projection is corrected by the next save or the bootstrap pass — neither
 				// overwrites the freshest document.
-				log.warn("After-commit projection task failed; swallowing per ADR Decision 12", e);
+				SafeLog.warn(log, "After-commit projection task failed; swallowing per ADR Decision 12", e);
 			}
 		};
 	}
