@@ -13,7 +13,7 @@
 
     <activator>org.openmrs.module.querystore.QueryStoreActivator</activator>
 
-    <require_version>2.8.0</require_version>
+    <require_version>2.9.0</require_version>
 
     <!-- The webservices.rest module hosts the /ws/rest/v1 dispatcher that serves the indexing-status
          REST controller (org.openmrs.module.querystore.web.rest). -->
