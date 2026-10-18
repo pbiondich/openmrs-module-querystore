@@ -16,8 +16,11 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import java.util.List;
+
 import org.junit.Test;
 import org.openmrs.module.DaemonToken;
+import org.openmrs.module.querystore.LogCapture;
 
 /**
  * Pins {@link BootstrapLauncher}'s daemon-token contract via its {@code DaemonExecutor} seam, so the
@@ -183,40 +186,88 @@ public class BootstrapLauncherTest {
 	}
 
 	@Test
-	public void launchEnsureIndexedAsync_collapsesRepeatsPerPatient_andReportsWarmingUntilTheTaskEnds() {
+	public void launchPatientWarm_collapsesRepeatsPerPatient_andReportsWarmingUntilTheTaskEnds() {
 		BootstrapLauncher launcher = new BootstrapLauncher();
 		final java.util.List<Runnable> tasks = new java.util.ArrayList<>();
 		launcher.setDaemonExecutor((task, token) -> tasks.add(task));
 		launcher.setDaemonToken(new DaemonToken("token-warm"));
 
-		assertTrue(launcher.launchEnsureIndexedAsync("patient-1"));
-		assertTrue("a repeat for the same patient reports success", launcher.launchEnsureIndexedAsync("patient-1"));
-		assertEquals("but hands off only one projection", 1, tasks.size());
+		assertTrue(launcher.launchPatientWarm("patient-1", () -> { }));
+		assertTrue("a repeat for the same patient reports success", launcher.launchPatientWarm("patient-1", () -> { }));
+		assertEquals("but hands off only one warm", 1, tasks.size());
 		assertTrue(launcher.isWarming("patient-1"));
 		assertFalse(launcher.isWarming("patient-2"));
 
-		// No OpenMRS context here, so the task's service lookup throws; the task must still release
-		// the patient, else every later warm for it would be swallowed as a duplicate.
 		tasks.get(0).run();
 		assertFalse(launcher.isWarming("patient-1"));
-		assertTrue(launcher.launchEnsureIndexedAsync("patient-1"));
+		assertTrue(launcher.launchPatientWarm("patient-1", () -> { }));
 		assertEquals(2, tasks.size());
 	}
 
 	@Test
-	public void launchEnsureIndexedAsync_refusesBeyondTheConcurrencyCap_andWithoutAToken() {
+	public void launchPatientWarm_marksAThrowingWarmFailed_untilALaterOneSucceeds() {
+		BootstrapLauncher launcher = SynchronousLaunchers.create();
+
+		assertTrue(launcher.launchPatientWarm("patient-1", () -> {
+			throw new IllegalStateException("projection blew up");
+		}));
+		assertTrue(launcher.hasFailed("patient-1"));
+		assertFalse("a failed warm no longer reads as in flight", launcher.isWarming("patient-1"));
+		assertFalse(launcher.hasFailed("patient-2"));
+
+		assertTrue("a failed patient can be warmed again", launcher.launchPatientWarm("patient-1", () -> { }));
+		assertFalse("and success clears the failure", launcher.hasFailed("patient-1"));
+	}
+
+	@Test
+	public void launchPatientWarm_refusesBeyondTheConcurrencyCap_andWithoutAToken() {
 		BootstrapLauncher launcher = new BootstrapLauncher();
 		final int[] launches = { 0 };
 		launcher.setDaemonExecutor((task, token) -> launches[0]++);
 
-		assertFalse("no token, no warm", launcher.launchEnsureIndexedAsync("patient-0"));
+		assertFalse("no token, no warm", launcher.launchPatientWarm("patient-0", () -> { }));
 
 		launcher.setDaemonToken(new DaemonToken("token-warm-cap"));
 		for (int i = 1; i <= BootstrapLauncher.MAX_CONCURRENT_PATIENT_WARMS; i++) {
-			assertTrue(launcher.launchEnsureIndexedAsync("patient-" + i));
+			assertTrue(launcher.launchPatientWarm("patient-" + i, () -> { }));
 		}
-		assertFalse("one past the cap is refused", launcher.launchEnsureIndexedAsync("patient-x"));
+		assertFalse("one past the cap is refused", launcher.launchPatientWarm("patient-x", () -> { }));
 		assertFalse(launcher.isWarming("patient-x"));
 		assertEquals(BootstrapLauncher.MAX_CONCURRENT_PATIENT_WARMS, launches[0]);
+	}
+
+	@Test
+	public void launchPatientWarm_logsStartAndDuplicateAtDebug_withoutThePatientUuid() {
+		BootstrapLauncher launcher = new BootstrapLauncher();
+		launcher.setDaemonExecutor((task, token) -> { });
+		launcher.setDaemonToken(new DaemonToken("token-warm-log"));
+
+		try (LogCapture log = LogCapture.of(BootstrapLauncher.class)) {
+			launcher.launchPatientWarm("patient-uuid-1", () -> { });
+			launcher.launchPatientWarm("patient-uuid-1", () -> { });
+
+			List<String> debug = log.at("DEBUG");
+			assertEquals(2, debug.size());
+			assertTrue(debug.get(0), debug.get(0).startsWith("Patient warm starting"));
+			assertTrue(debug.get(1), debug.get(1).contains("ignoring duplicate"));
+			for (String line : log.lines()) {
+				assertFalse(line, line.contains("patient-uuid-1"));
+			}
+		}
+	}
+
+	@Test
+	public void launchPatientWarm_failureWarnsWithoutThePatientUuid_andNamesItOnlyAtDebug() {
+		BootstrapLauncher launcher = SynchronousLaunchers.create();
+
+		try (LogCapture log = LogCapture.of(BootstrapLauncher.class)) {
+			launcher.launchPatientWarm("patient-uuid-2", () -> {
+				throw new IllegalStateException("boom");
+			});
+
+			assertEquals(1, log.at("WARN").size());
+			assertFalse(log.at("WARN").get(0).contains("patient-uuid-2"));
+			assertTrue(log.at("DEBUG").stream().anyMatch(l -> l.contains("patient-uuid-2")));
+		}
 	}
 }

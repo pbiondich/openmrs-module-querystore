@@ -57,6 +57,10 @@ public class BootstrapLauncher {
 	// and the source of the "projecting" index status.
 	private final Set<String> warmingPatients = ConcurrentHashMap.newKeySet();
 
+	// Patients whose last warm failed: the source of the "failed" index status. Grows by one entry per
+	// failing patient until a warm for it succeeds.
+	private final Set<String> failedPatients = ConcurrentHashMap.newKeySet();
+
 	public void setDaemonToken(DaemonToken token) {
 		this.daemonToken = token;
 	}
@@ -153,20 +157,22 @@ public class BootstrapLauncher {
 	}
 
 	/**
-	 * Projects one never-indexed patient on a daemon thread ({@link BootstrapService#ensureIndexed}),
-	 * returning immediately. Backs the omnibar's warm-on-chart-open: the chart is projected while the
-	 * user reads the banner, so the first keystroke doesn't pay the cold projection.
+	 * Runs one patient's warm ({@code work}, typically {@link BootstrapService#ensureIndexed}) on a
+	 * daemon thread, returning immediately. Backs the omnibar's warm-on-chart-open: the chart is
+	 * projected while the user reads the banner, so the first keystroke doesn't pay the cold
+	 * projection. {@code work} signals failure by throwing; the patient then reads as failed
+	 * ({@link #hasFailed}) until a later warm for it succeeds.
 	 *
 	 * <p>Idempotent per patient: a request for a patient already in flight is a no-op that reports
 	 * success. Bounded across patients by {@link #MAX_CONCURRENT_PATIENT_WARMS}: {@link Daemon} spawns a
 	 * thread per call rather than drawing from a pool, so without a cap a burst of chart opens would
 	 * run that many projections (and embedding passes) at once.
 	 *
-	 * @return {@code true} once a projection for this patient is in flight (newly launched or already
+	 * @return {@code true} once a warm for this patient is in flight (newly launched or already
 	 *         running); {@code false} when no {@link DaemonToken} is wired yet or the concurrency cap is
 	 *         reached, in which case nothing runs and the caller may retry later.
 	 */
-	public boolean launchEnsureIndexedAsync(String patientUuid) {
+	public boolean launchPatientWarm(String patientUuid, Runnable work) {
 		DaemonToken token = this.daemonToken;
 		if (token == null || patientUuid == null) {
 			return false;
@@ -189,11 +195,14 @@ public class BootstrapLauncher {
 		try {
 			daemonExecutor.execute(() -> {
 				try {
-					Context.getService(BootstrapService.class).ensureIndexed(patientUuid);
+					work.run();
+					failedPatients.remove(patientUuid);
 				}
 				catch (RuntimeException e) {
-					// Fire-and-forget: no caller upstack. The next cold read retries via the lazy path.
-					log.warn("Background warm for patient " + patientUuid + " failed", e);
+					// Fire-and-forget: no caller upstack, so the failure is kept for the status read.
+					failedPatients.add(patientUuid);
+					log.warn("Background patient warm failed (patient uuid at DEBUG)", e);
+					log.debug("Background warm failed for patient " + patientUuid);
 				}
 				finally {
 					warmingPatients.remove(patientUuid);
@@ -208,12 +217,20 @@ public class BootstrapLauncher {
 	}
 
 	/**
-	 * True while a {@link #launchEnsureIndexedAsync} projection for this patient is running. Does not
-	 * see a synchronous cold-touch projection (a {@code searchByPatient} on a never-indexed patient),
-	 * which runs on the request thread.
+	 * True while a {@link #launchPatientWarm} for this patient is running. Does not see a synchronous
+	 * cold-touch projection (a {@code searchByPatient} on a never-indexed patient), which runs on the
+	 * request thread.
 	 */
 	public boolean isWarming(String patientUuid) {
 		return patientUuid != null && warmingPatients.contains(patientUuid);
+	}
+
+	/**
+	 * True when this patient's last {@link #launchPatientWarm} failed and none has succeeded since.
+	 * Per JVM and not persisted: a restart forgets it.
+	 */
+	public boolean hasFailed(String patientUuid) {
+		return patientUuid != null && failedPatients.contains(patientUuid);
 	}
 
 	/**

@@ -190,7 +190,7 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 			return;
 		}
 		if (backend == null) {
-			log.warn("No BackendStore wired; ignoring bulkDeleteByPatient call for " + patientUuid);
+			log.warn("No BackendStore wired; ignoring a bulkDeleteByPatient call");
 			return;
 		}
 		backend.bulkDeleteByPatient(patientUuid);
@@ -242,19 +242,19 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 	 *  and returns whatever the backend has. */
 	private void ensureIndexedSafely(String patientUuid) {
 		try {
-			BootstrapService bootstrapService = bootstrapServiceOverride;
-			if (bootstrapService == null) {
-				bootstrapService = Context.getService(BootstrapService.class);
-			}
-			bootstrapService.ensureIndexed(patientUuid);
+			bootstrapService().ensureIndexed(patientUuid);
 		}
 		catch (RuntimeException e) {
 			// Index-failure must not block search; whatever did get indexed (or what was already
 			// present) is still searchable. Empty results are the same outcome as before this
 			// feature shipped.
-			log.warn("Auto-index for patient " + patientUuid
-			        + " failed; serving search with whatever is indexed", e);
+			log.warn("Auto-index for a cold patient failed; serving search with whatever is indexed", e);
+			log.debug("Auto-index failed for patient " + patientUuid);
 		}
+	}
+
+	private BootstrapService bootstrapService() {
+		return bootstrapServiceOverride != null ? bootstrapServiceOverride : Context.getService(BootstrapService.class);
 	}
 
 	@Override
@@ -291,17 +291,37 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 		if (bootstrapLauncher != null && bootstrapLauncher.isWarming(patientUuid)) {
 			return IndexStatus.PROJECTING;
 		}
+		// Failed before indexed: a warm that threw partway leaves a partial chart that exists.
+		if (bootstrapLauncher != null && bootstrapLauncher.hasFailed(patientUuid)) {
+			return IndexStatus.FAILED;
+		}
 		return backend.existsByPatient(patientUuid) ? IndexStatus.INDEXED : IndexStatus.NOT_INDEXED;
 	}
 
 	@Override
 	public IndexStatus warm(String patientUuid) {
 		IndexStatus status = getIndexStatus(patientUuid);
-		if (status != IndexStatus.NOT_INDEXED || backend == null || patientUuid == null) {
+		if (status == IndexStatus.PROJECTING || status == IndexStatus.INDEXED || backend == null
+		        || patientUuid == null) {
 			return status;
 		}
-		return bootstrapLauncher != null && bootstrapLauncher.launchEnsureIndexedAsync(patientUuid)
-		        ? IndexStatus.PROJECTING : IndexStatus.NOT_INDEXED;
+		// A retry re-projects in full: the failed warm may have left a partial chart, which
+		// ensureIndexed would take as indexed and skip.
+		boolean retry = status == IndexStatus.FAILED;
+		Runnable work = () -> {
+			if (retry) {
+				bootstrapService().reindexPatient(patientUuid);
+			} else {
+				bootstrapService().ensureIndexed(patientUuid);
+			}
+			// A real patient always projects at least its patient document, so nothing indexed means
+			// the projection failed (or the uuid is no patient's).
+			if (!backend.existsByPatient(patientUuid)) {
+				throw new IllegalStateException("Warm finished with nothing indexed");
+			}
+		};
+		return bootstrapLauncher != null && bootstrapLauncher.launchPatientWarm(patientUuid, work)
+		        ? IndexStatus.PROJECTING : status;
 	}
 
 	/**
@@ -320,7 +340,9 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 			if (!spec.isWait()) {
 				// A partly-projected chart answers "no CD4" for a patient whose obs haven't landed
 				// yet, so a projecting patient gets nothing rather than a misleading partial answer.
-				return QueryResult.empty(warm(patientUuid), spec);
+				// A failed one isn't retried here: that would re-run a failing projection on every
+				// keystroke. An explicit warm retries it.
+				return QueryResult.empty(status == IndexStatus.FAILED ? status : warm(patientUuid), spec);
 			}
 			// Blocks on the per-patient lock while a background warm finishes, then short-circuits.
 			ensureIndexedSafely(patientUuid);

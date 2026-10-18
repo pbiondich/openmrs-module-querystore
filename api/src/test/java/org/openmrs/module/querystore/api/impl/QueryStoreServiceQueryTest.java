@@ -43,6 +43,7 @@ import org.openmrs.module.querystore.bootstrap.BootstrapLauncher;
 import org.openmrs.module.querystore.bootstrap.BootstrapProgress;
 import org.openmrs.module.querystore.bootstrap.BootstrapService;
 import org.openmrs.module.querystore.bootstrap.DriftReport;
+import org.openmrs.module.querystore.bootstrap.SynchronousLaunchers;
 import org.openmrs.module.querystore.embedding.EmbeddingProvider;
 import org.openmrs.module.querystore.model.QueryDocument;
 
@@ -372,6 +373,54 @@ public class QueryStoreServiceQueryTest {
 		assertTrue(launcher.launched.isEmpty());
 	}
 
+	// ---------- failed warms ----------
+
+	@Test
+	public void warm_thatIndexesNothing_readsFailed_andAKeystrokeDoesNotRetryIt() {
+		// A real launcher, run synchronously: the projection "succeeds" but writes nothing (a uuid that
+		// is no patient's, or every type failing), which is a failed warm, not a silent not_indexed.
+		service.setBootstrapLauncher(SynchronousLaunchers.create());
+
+		assertEquals("the call itself starts the warm", IndexStatus.PROJECTING, service.warm(PATIENT));
+		assertEquals(IndexStatus.FAILED, service.getIndexStatus(PATIENT));
+
+		QueryResult keystroke = service.query(spec("cd4").wait(false).build());
+		assertEquals(IndexStatus.FAILED, keystroke.getStatus());
+		assertTrue(keystroke.getHits().isEmpty());
+		assertEquals("a keystroke must not re-run a failing projection", 1, bootstrap.ensureIndexedCalls.size());
+		assertTrue(bootstrap.reindexCalls.isEmpty());
+	}
+
+	@Test
+	public void warm_afterAFailure_retriesWithAFullReprojection_andRecovers() {
+		service.setBootstrapLauncher(SynchronousLaunchers.create());
+		service.warm(PATIENT);
+		assertEquals(IndexStatus.FAILED, service.getIndexStatus(PATIENT));
+
+		// Second time round the projection works. A retry re-projects in full (reindexPatient), since a
+		// failed warm may have left a partial chart that ensureIndexed would skip.
+		bootstrap.onEnsureIndexed = uuid -> index(obs("cd4-1", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-03-12"));
+		service.warm(PATIENT);
+
+		assertEquals(Collections.singletonList(PATIENT), bootstrap.reindexCalls);
+		assertEquals(IndexStatus.INDEXED, service.getIndexStatus(PATIENT));
+		assertEquals(1, service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD).wait(false).build()).getHits().size());
+	}
+
+	@Test
+	public void warm_thatThrowsPartway_readsFailedEvenThoughSomeTypesLanded() {
+		service.setBootstrapLauncher(SynchronousLaunchers.create());
+		bootstrap.onEnsureIndexed = uuid -> {
+			index(obs("cd4-1", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-03-12"));
+			throw new IllegalStateException("conditions failed");
+		};
+
+		service.warm(PATIENT);
+
+		assertEquals("a partial chart is not reported as indexed", IndexStatus.FAILED, service.getIndexStatus(PATIENT));
+		assertEquals("failed", IndexStatus.FAILED.wireName());
+	}
+
 	// ---------- spec validation ----------
 
 	@Test
@@ -486,7 +535,7 @@ public class QueryStoreServiceQueryTest {
 		boolean warming;
 
 		@Override
-		public boolean launchEnsureIndexedAsync(String patientUuid) {
+		public boolean launchPatientWarm(String patientUuid, Runnable work) {
 			if (!accept) {
 				return false;
 			}
@@ -523,6 +572,8 @@ public class QueryStoreServiceQueryTest {
 
 		final List<String> ensureIndexedCalls = new ArrayList<>();
 
+		final List<String> reindexCalls = new ArrayList<>();
+
 		java.util.function.Consumer<String> onEnsureIndexed;
 
 		@Override public void bootstrap() { }
@@ -535,7 +586,12 @@ public class QueryStoreServiceQueryTest {
 				onEnsureIndexed.accept(patientUuid);
 			}
 		}
-		@Override public void reindexPatient(String patientUuid) { }
+		@Override public void reindexPatient(String patientUuid) {
+			reindexCalls.add(patientUuid);
+			if (onEnsureIndexed != null) {
+				onEnsureIndexed.accept(patientUuid);
+			}
+		}
 		@Override public List<BootstrapProgress> getStatus() { return Collections.emptyList(); }
 		@Override public BootstrapProgress getStatus(String resourceType) { return null; }
 		@Override public DriftReport getDrift() { return null; }

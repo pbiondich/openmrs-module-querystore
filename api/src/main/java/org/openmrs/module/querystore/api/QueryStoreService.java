@@ -142,8 +142,8 @@ public interface QueryStoreService extends OpenmrsService {
 	 * cold-bootstrap path, and returns the partial chart without retrying the failed types. The
 	 * patient stays under-projected until the global scheduled scan re-runs (or a write event for
 	 * a failed-type resource triggers single-doc indexing). Operators monitoring querystore should
-	 * watch for the "Per-patient projection of {type} for patient {uuid} failed" WARN log as the
-	 * signal of an under-projected patient. A per-type-per-patient retry marker is tracked under
+	 * watch for the "Per-patient projection of {type} failed" WARN log as the signal of an
+	 * under-projected patient; the patient's uuid is on a companion DEBUG line. A per-type-per-patient retry marker is tracked under
 	 * the ADR's "Lazy per-patient projection" open question.
 	 *
 	 * <p>Token-budget enforcement is the consumer's responsibility — v1 returns whatever the index
@@ -186,9 +186,11 @@ public interface QueryStoreService extends OpenmrsService {
 
 	/**
 	 * Starts projecting a never-indexed patient on a background thread and returns at once.
-	 * Idempotent: an indexed patient, or one already being projected, starts nothing. Returns the
-	 * status after the call; {@link IndexStatus#NOT_INDEXED} means nothing could be started (the
-	 * daemon isn't up yet, or too many warms are running) and the caller may retry.
+	 * Idempotent: an indexed patient, or one already being projected, starts nothing. A patient whose
+	 * last warm failed ({@link IndexStatus#FAILED}) is retried with a full re-projection. Returns the
+	 * status after the call; {@link IndexStatus#NOT_INDEXED} or {@link IndexStatus#FAILED} means
+	 * nothing could be started (the daemon isn't up yet, or too many warms are running) and the
+	 * caller may retry.
 	 */
 	@Authorized(PrivilegeConstants.GET_PATIENTS)
 	default IndexStatus warm(String patientUuid) {
