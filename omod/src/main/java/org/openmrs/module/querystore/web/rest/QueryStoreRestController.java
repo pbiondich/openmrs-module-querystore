@@ -31,8 +31,6 @@ import org.openmrs.module.querystore.bootstrap.BootstrapService;
 import org.openmrs.module.querystore.bootstrap.BootstrapStatusReport;
 import org.openmrs.module.webservices.rest.web.RestConstants;
 import org.openmrs.util.PrivilegeConstants;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -78,7 +76,6 @@ import org.springframework.web.bind.annotation.ResponseBody;
 @RequestMapping("/rest/" + RestConstants.VERSION_1 + "/querystore")
 public class QueryStoreRestController {
 
-	private static final Logger log = LoggerFactory.getLogger(QueryStoreRestController.class);
 
 	/**
 	 * Per-resource-type bootstrap status plus a derived {@code complete} flag. Gated by
@@ -212,12 +209,20 @@ public class QueryStoreRestController {
 			return errorResponse(HttpStatus.BAD_REQUEST, "patient or scope (\"all\" or \"type\") is required");
 		}
 
-		bootstrapService().reindexPatient(patientUuid);
-
+		// Bounded like any projection: inside a projection slot, waiting for one at most
+		// querystore.projection.syncWaitSeconds, and 503 when none came free.
+		IndexStatus reindexed = queryStoreService().reindex(patientUuid);
+		if (reindexed == IndexStatus.NOT_INDEXED) {
+			Map<String, Object> busy = new HashMap<String, Object>();
+			busy.put("error", "No projection slot free; retry later");
+			return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+			        .header("Retry-After", String.valueOf(WARM_RETRY_AFTER_SECONDS)).<Object> body(busy);
+		}
 		int documentsIndexed = queryStoreService().getPatientChart(patientUuid).size();
 		Map<String, Object> result = new HashMap<String, Object>();
 		result.put("patient", patientUuid);
 		result.put("documentsIndexed", documentsIndexed);
+		result.put("status", reindexed.wireName());
 		return new ResponseEntity<Object>(result, HttpStatus.OK);
 	}
 
@@ -230,43 +235,14 @@ public class QueryStoreRestController {
 	/** Largest page the REST surface serves, so {@code recent} can't become a full-chart dump. */
 	static final int MAX_PAGE = 50;
 
-	/** Longest query text accepted: type-ahead and questions are short, and hybrid mode encodes it. */
-	static final int MAX_QUERY_LENGTH = 500;
+	/** Longest query text accepted; see {@link PatientRequests#MAX_QUERY_LENGTH}. */
+	static final int MAX_QUERY_LENGTH = PatientRequests.MAX_QUERY_LENGTH;
 
 	/** Largest offset accepted. Past the candidate pool a page is empty, so this only stops abuse. */
 	static final int MAX_OFFSET = 1000;
 
-	/** Longest slice of a caller's value echoed back in a 400. */
-	private static final int MAX_ECHO = 40;
-
 	/** Seconds a caller is told to wait before retrying a warm that could not start. */
 	static final int WARM_RETRY_AFTER_SECONDS = 5;
-
-	// The core privilege that reads each core type's records: the patient endpoints return only what
-	// the caller could read through core's own API. A type a module contributes needs Get Patients.
-	private static final Map<String, String> READ_PRIVILEGE;
-
-	static {
-		Map<String, String> m = new HashMap<String, String>();
-		m.put("patient", PrivilegeConstants.GET_PATIENTS);
-		m.put("obs", PrivilegeConstants.GET_OBS);
-		m.put("encounter", PrivilegeConstants.GET_ENCOUNTERS);
-		m.put("visit", PrivilegeConstants.GET_VISITS);
-		m.put("condition", PrivilegeConstants.GET_CONDITIONS);
-		m.put("diagnosis", PrivilegeConstants.GET_DIAGNOSES);
-		m.put("allergy", PrivilegeConstants.GET_ALLERGIES);
-		m.put("drug_order", PrivilegeConstants.GET_ORDERS);
-		m.put("test_order", PrivilegeConstants.GET_ORDERS);
-		m.put("referral_order", PrivilegeConstants.GET_ORDERS);
-		m.put("medication_dispense", PrivilegeConstants.GET_MEDICATION_DISPENSE);
-		m.put("program", PrivilegeConstants.GET_PATIENT_PROGRAMS);
-		READ_PRIVILEGE = java.util.Collections.unmodifiableMap(m);
-	}
-
-	// What a patient uuid in the path can look like (core's uuid column is 38 characters). Anything
-	// else is not a patient's, without asking core.
-	private static final java.util.regex.Pattern PATIENT_UUID_SHAPE = java.util.regex.Pattern
-	        .compile("[A-Za-z0-9-]{1,38}");
 
 	/**
 	 * Starts projecting a never-indexed patient in the background, or retries one whose last warm
@@ -342,13 +318,7 @@ public class QueryStoreRestController {
 	        @RequestParam(value = "wait", required = false, defaultValue = "true") boolean wait) {
 		Context.requirePrivilege(PrivilegeConstants.GET_PATIENTS);
 		requirePatient(patientUuid);
-		if (StringUtils.isBlank(q)) {
-			throw new BadParameterException("q is required");
-		}
-		if (q.length() > MAX_QUERY_LENGTH) {
-			throw new BadParameterException("q must be at most " + MAX_QUERY_LENGTH + " characters");
-		}
-		QuerySpec.Builder spec = QuerySpec.forPatient(patientUuid).query(q)
+		QuerySpec.Builder spec = QuerySpec.forPatient(patientUuid).query(PatientRequests.requireQuery(q))
 		        .mode(parse(QuerySpec.Mode.class, "mode", mode, QuerySpec.Mode.HYBRID))
 		        .sort(parse(QuerySpec.Sort.class, "sort", sort, QuerySpec.Sort.RELEVANCE))
 		        .collapse(parse(QuerySpec.Collapse.class, "collapse", collapse, QuerySpec.Collapse.NONE))
@@ -359,72 +329,21 @@ public class QueryStoreRestController {
 			}
 			spec.offset(offset);
 		}
-		for (String facet : splitTypes(facets)) {
+		for (String facet : PatientRequests.splitList(facets)) {
 			if (!"resourceType".equals(facet)) {
-				throw new BadParameterException("Unknown facet '" + echo(facet) + "'; supported: resourceType");
+				throw new BadParameterException("Unknown facet '" + PatientRequests.echo(facet) + "'; supported: resourceType");
 			}
 			spec.facet(QuerySpec.Facet.RESOURCE_TYPE);
 		}
 		return new ResponseEntity<Object>(queryStoreService().query(spec.build()).toMap(), HttpStatus.OK);
 	}
 
-	/**
-	 * 404 unless core shows this caller the patient, and it is not voided.
-	 * The lookup goes through core's own patient read,
-	 * so whatever patient-level restriction a deployment applies there applies here too (ADR Decision
-	 * 14 leaves querystore's own checks at the privilege), and a uuid that is no patient's never
-	 * reaches the warm machinery, whose per-patient bookkeeping would otherwise grow with every uuid a
-	 * caller tries. A 404 tells the caller no more than core's {@code GET /patient/{uuid}} does.
-	 */
 	private void requirePatient(String patientUuid) {
-		if (patientUuid == null || !PATIENT_UUID_SHAPE.matcher(patientUuid).matches()) {
-			throw new PatientNotFoundException();
-		}
-		// getPatientByUuid returns voided patients too; a voided patient has no read-store presence
-		// (ADR Decision 10), so its warm could only ever fail.
-		Patient patient = patientService().getPatientByUuid(patientUuid);
-		if (patient == null || Boolean.TRUE.equals(patient.getVoided())) {
-			throw new PatientNotFoundException();
-		}
+		PatientRequests.requirePatient(patientService(), patientUuid);
 	}
 
-	/**
-	 * The types to search: those the caller named, or every registered type, limited to types whose
-	 * records the caller could read through core ({@link #READ_PRIVILEGE}). A named type that is not
-	 * registered is a 400 (the Lucene and MySQL backends create an index or table for any well-formed
-	 * type a search names); a named type the caller may not read is a 403; an unnamed one is left out.
-	 * An empty result means every type.
-	 */
 	private List<String> readableTypes(String csv) {
-		List<String> requested = splitTypes(csv);
-		List<String> known = bootstrapService().getResourceTypeNames();
-		for (String type : requested) {
-			if (!known.contains(type)) {
-				throw new BadParameterException("Unknown type '" + echo(type) + "'");
-			}
-		}
-		if (!requested.isEmpty()) {
-			for (String type : requested) {
-				Context.requirePrivilege(readPrivilege(type));
-			}
-			return requested;
-		}
-		List<String> readable = new ArrayList<String>();
-		for (String type : known) {
-			if (Context.hasPrivilege(readPrivilege(type))) {
-				readable.add(type);
-			}
-		}
-		return readable.size() == known.size() ? new ArrayList<String>() : readable;
-	}
-
-	private static String readPrivilege(String type) {
-		String privilege = READ_PRIVILEGE.get(type);
-		return privilege != null ? privilege : PrivilegeConstants.GET_PATIENTS;
-	}
-
-	private static String echo(String value) {
-		return StringUtils.abbreviate(value, MAX_ECHO);
+		return PatientRequests.readableTypes(csv, bootstrapService().getResourceTypeNames());
 	}
 
 	private static ResponseEntity<Object> statusResponse(IndexStatus status, HttpStatus httpStatus) {
@@ -443,18 +362,6 @@ public class QueryStoreRestController {
 		return limit;
 	}
 
-	private static List<String> splitTypes(String csv) {
-		List<String> out = new ArrayList<String>();
-		if (csv != null) {
-			for (String part : csv.split(",")) {
-				if (StringUtils.isNotBlank(part)) {
-					out.add(part.trim());
-				}
-			}
-		}
-		return out;
-	}
-
 	private static <E extends Enum<E>> E parse(Class<E> type, String name, String value, E defaultValue) {
 		if (StringUtils.isBlank(value)) {
 			return defaultValue;
@@ -464,23 +371,7 @@ public class QueryStoreRestController {
 				return constant;
 			}
 		}
-		throw new BadParameterException("Unknown " + name + " '" + echo(value) + "'");
-	}
-
-	/** A request parameter the endpoint can't honour; its message is safe to return to the caller. */
-	static final class BadParameterException extends RuntimeException {
-
-		private static final long serialVersionUID = 1L;
-
-		BadParameterException(String message) {
-			super(message);
-		}
-	}
-
-	/** The patient in the path is not one core shows this caller. */
-	static final class PatientNotFoundException extends RuntimeException {
-
-		private static final long serialVersionUID = 1L;
+		throw new BadParameterException("Unknown " + name + " '" + PatientRequests.echo(value) + "'");
 	}
 
 	@ExceptionHandler(PatientNotFoundException.class)

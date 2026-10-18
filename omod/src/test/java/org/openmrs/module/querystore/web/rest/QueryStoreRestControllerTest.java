@@ -262,6 +262,7 @@ public class QueryStoreRestControllerTest {
 		QueryStoreService queryStore = mock(QueryStoreService.class);
 		when(queryStore.getPatientChart("patient-uuid"))
 		        .thenReturn(Arrays.asList(new QueryDocument(), new QueryDocument(), new QueryDocument()));
+		when(queryStore.reindex("patient-uuid")).thenReturn(IndexStatus.INDEXED);
 		controller.setBootstrapService(bootstrap);
 		controller.setQueryStoreService(queryStore);
 		// Inject a launcher too, only to prove the per-patient path never touches it (routing isolation).
@@ -275,8 +276,79 @@ public class QueryStoreRestControllerTest {
 		assertEquals("patient-uuid", body.get("patient"));
 		assertEquals("documentsIndexed must report the reprojected chart's size", Integer.valueOf(3),
 		    body.get("documentsIndexed"));
-		verify(bootstrap).reindexPatient("patient-uuid");
+		assertEquals("indexed", body.get("status"));
+		verify(queryStore).reindex("patient-uuid");
+		org.mockito.Mockito.verify(bootstrap, org.mockito.Mockito.never()).reindexPatient("patient-uuid");
 		assertEquals("a per-patient reindex must not also launch a global bootstrap", 0, launcher.launches);
+	}
+
+	@Test
+	public void reindex_withPatient_isA503_whenNoProjectionSlotIsFree() {
+		authenticate();
+		QueryStoreService queryStore = mock(QueryStoreService.class);
+		when(queryStore.reindex("patient-uuid")).thenReturn(IndexStatus.NOT_INDEXED);
+		controller.setQueryStoreService(queryStore);
+
+		ResponseEntity<Object> response = controller.reindex(Collections.singletonMap("patient", "patient-uuid"));
+
+		assertEquals(HttpStatus.SERVICE_UNAVAILABLE, response.getStatusCode());
+		assertNotNull(response.getHeaders().getFirst("Retry-After"));
+		org.mockito.Mockito.verify(queryStore, org.mockito.Mockito.never()).getPatientChart("patient-uuid");
+	}
+
+	@Test
+	public void aTypeNoCorePrivilegeReads_isDeniedByDefault_andRepeatsAreDropped() {
+		authenticate();
+		BootstrapService bootstrap = mock(BootstrapService.class);
+		when(bootstrap.getResourceTypeNames()).thenReturn(Arrays.asList("obs", "condition", "mymodule_note"));
+		controller.setBootstrapService(bootstrap);
+		QueryStoreService queryStore = mock(QueryStoreService.class);
+		when(queryStore.query(org.mockito.ArgumentMatchers.any(QuerySpec.class)))
+		        .thenReturn(QueryResult.empty(IndexStatus.INDEXED, QuerySpec.forPatient("p").query("x").build()));
+		controller.setQueryStoreService(queryStore);
+
+		controller.search("patient-uuid", "cd4", null, null, null, null, null, null, null, true);
+		controller.search("patient-uuid", "cd4", null, "obs,obs, obs", null, null, null, null, null, true);
+		ArgumentCaptor<QuerySpec> captor = ArgumentCaptor.forClass(QuerySpec.class);
+		verify(queryStore, org.mockito.Mockito.times(2)).query(captor.capture());
+		assertEquals("a contributed type with no read privilege is left out, even for a caller with every privilege",
+		    Arrays.asList("obs", "condition"), captor.getAllValues().get(0).getTypes());
+		assertEquals(Collections.singletonList("obs"), captor.getAllValues().get(1).getTypes());
+
+		try {
+			controller.search("patient-uuid", "cd4", null, "mymodule_note", null, null, null, null, null, true);
+			throw new AssertionError("expected a 403 for naming it");
+		}
+		catch (ContextAuthenticationException expected) {
+			// pass
+		}
+	}
+
+	@Test
+	public void aCallerWhoCanReadNoType_getsA403_notASearchOfEveryType() {
+		Context.setUserContext(new UserContext(null) {
+
+			@Override
+			public User getAuthenticatedUser() {
+				return new User();
+			}
+
+			@Override
+			public boolean hasPrivilege(String privilege) {
+				return PrivilegeConstants.GET_PATIENTS.equals(privilege);
+			}
+		});
+		QueryStoreService queryStore = mock(QueryStoreService.class);
+		controller.setQueryStoreService(queryStore);
+
+		try {
+			controller.search("patient-uuid", "cd4", null, null, null, null, null, null, null, true);
+			throw new AssertionError("expected a 403");
+		}
+		catch (ContextAuthenticationException expected) {
+			// pass: the registered types here are obs and condition, neither readable with Get Patients
+		}
+		org.mockito.Mockito.verifyNoInteractions(queryStore);
 	}
 
 	@Test
@@ -564,7 +636,7 @@ public class QueryStoreRestControllerTest {
 				call.run();
 				throw new AssertionError("expected a 404");
 			}
-			catch (QueryStoreRestController.PatientNotFoundException e) {
+			catch (PatientNotFoundException e) {
 				ResponseEntity<Object> response = controller.handlePatientNotFound(e);
 				assertEquals(HttpStatus.NOT_FOUND, response.getStatusCode());
 				assertEquals("Patient not found", errorOf(response));
@@ -669,7 +741,7 @@ public class QueryStoreRestControllerTest {
 				controller.status(path);
 				throw new AssertionError("expected a 404 for " + path);
 			}
-			catch (QueryStoreRestController.PatientNotFoundException expected) {
+			catch (PatientNotFoundException expected) {
 				// pass
 			}
 		}
@@ -698,7 +770,7 @@ public class QueryStoreRestControllerTest {
 		try {
 			call.run();
 		}
-		catch (QueryStoreRestController.BadParameterException e) {
+		catch (BadParameterException e) {
 			ResponseEntity<Object> response = controller.handleBadParameter(e);
 			assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
 			return errorOf(response);
