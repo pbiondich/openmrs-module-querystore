@@ -223,6 +223,16 @@ public class BootstrapServiceImpl extends BaseOpenmrsService implements Bootstra
 		}
 	}
 
+	@Override
+	public void forgetPatient(String patientUuid) {
+		if (patientUuid == null || patientUuid.isEmpty()) {
+			return;
+		}
+		synchronized (patientLock(patientUuid)) {
+			queryStoreService.bulkDeleteByPatient(patientUuid);
+		}
+	}
+
 	private static void throwIfAnyFailed(List<String> failedTypes) {
 		if (!failedTypes.isEmpty()) {
 			throw new PartialProjectionException(failedTypes);
