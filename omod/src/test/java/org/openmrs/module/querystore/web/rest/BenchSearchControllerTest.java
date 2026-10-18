@@ -271,6 +271,43 @@ public class BenchSearchControllerTest {
 	}
 
 	@Test
+	public void benchSearch_filteredBranch_waitsOnlyForANotIndexedChart_neverJoiningAProjectionInFlight() {
+		// code r2 S2: joining a projection in flight (an omnibar-started retry, say) would time it as
+		// the search. Only a cold chart is projected on the request, as searchByPatient does.
+		Context.setUserContext(new UserContext(null) {
+
+			@Override
+			public User getAuthenticatedUser() {
+				return new User();
+			}
+
+			@Override
+			public boolean hasPrivilege(String privilege) {
+				return PrivilegeConstants.GET_PATIENTS.equals(privilege) || PrivilegeConstants.GET_CONDITIONS.equals(privilege);
+			}
+		});
+		QueryStoreService queryStore = mock(QueryStoreService.class);
+		when(queryStore.getIndexStatus("patient-uuid")).thenReturn(org.openmrs.module.querystore.api.IndexStatus.PROJECTING,
+		    org.openmrs.module.querystore.api.IndexStatus.NOT_INDEXED, org.openmrs.module.querystore.api.IndexStatus.INDEXED,
+		    org.openmrs.module.querystore.api.IndexStatus.FAILED);
+		when(queryStore.query(org.mockito.ArgumentMatchers.any(org.openmrs.module.querystore.api.QuerySpec.class)))
+		        .thenReturn(org.openmrs.module.querystore.api.QueryResult.statusOnly(org.openmrs.module.querystore.api.IndexStatus.INDEXED));
+		controller.setQueryStoreService(queryStore);
+
+		for (int i = 0; i < 4; i++) {
+			controller.benchSearch("patient-uuid", "hiv", 50, false);
+		}
+
+		org.mockito.ArgumentCaptor<org.openmrs.module.querystore.api.QuerySpec> spec = org.mockito.ArgumentCaptor
+		        .forClass(org.openmrs.module.querystore.api.QuerySpec.class);
+		verify(queryStore, org.mockito.Mockito.times(4)).query(spec.capture());
+		assertFalse("projecting: never join it", spec.getAllValues().get(0).isWait());
+		assertTrue("not indexed: project it on the request", spec.getAllValues().get(1).isWait());
+		assertFalse(spec.getAllValues().get(2).isWait());
+		assertFalse(spec.getAllValues().get(3).isWait());
+	}
+
+	@Test
 	public void benchSearch_returns400_whenQueryBlank() {
 		authenticate();
 		QueryStoreService queryStore = mock(QueryStoreService.class);
