@@ -10,6 +10,7 @@
 package org.openmrs.module.querystore.web.rest;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -223,6 +224,7 @@ public class BenchSearchControllerTest {
 		        .forClass(org.openmrs.module.querystore.api.QuerySpec.class);
 		verify(queryStore).query(spec.capture());
 		assertEquals(Collections.singletonList("condition"), spec.getValue().getTypes());
+		assertFalse("no partial rows for a caller who cannot read every type", spec.getValue().isPartialResults());
 		verify(queryStore, never()).searchByPatient(anyString(), anyString(), anyInt());
 	}
 
