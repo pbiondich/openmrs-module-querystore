@@ -12,8 +12,6 @@ package org.openmrs.module.querystore.events;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.openmrs.BaseOpenmrsData;
 import org.openmrs.Obs;
 import org.openmrs.Person;
@@ -68,8 +66,6 @@ import org.springframework.context.event.EventListener;
  * cheaply by the {@code instanceof BaseOpenmrsData} check and the serializer lookup returning null.
  */
 public class CoreServiceEventListener {
-
-	private final Log log = LogFactory.getLog(getClass());
 
 	@EventListener
 	public void onSave(SaveServiceEvent<?> event) {

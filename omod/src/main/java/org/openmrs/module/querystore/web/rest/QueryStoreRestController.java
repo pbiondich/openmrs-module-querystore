@@ -369,7 +369,8 @@ public class QueryStoreRestController {
 	}
 
 	/**
-	 * 404 unless core shows this caller the patient, and it is not voided. The lookup goes through core's own patient read,
+	 * 404 unless core shows this caller the patient, and it is not voided.
+	 * The lookup goes through core's own patient read,
 	 * so whatever patient-level restriction a deployment applies there applies here too (ADR Decision
 	 * 14 leaves querystore's own checks at the privilege), and a uuid that is no patient's never
 	 * reaches the warm machinery, whose per-patient bookkeeping would otherwise grow with every uuid a

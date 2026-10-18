@@ -175,8 +175,6 @@ public class QueryStoreActivator extends BaseModuleActivator implements DaemonTo
 		log.info("Query Store module stopped");
 	}
 
-	/** True when the autostart property is set to {@code "true"} (case-insensitive); the GP is
-	 *  registered declaratively in {@code omod/src/main/resources/config.xml}. */
 	/**
 	 * Applies the projection and query limits from their global properties. A value that isn't a
 	 * positive integer keeps the default.
@@ -201,6 +199,8 @@ public class QueryStoreActivator extends BaseModuleActivator implements DaemonTo
 		}
 	}
 
+	/** True when the autostart property is set to {@code "true"} (case-insensitive); the GP is
+	 *  registered declaratively in {@code omod/src/main/resources/config.xml}. */
 	boolean isAutostartEnabled(AdministrationService admin) {
 		return Boolean.TRUE.equals(admin.getGlobalPropertyValue(
 		        QueryStoreConstants.GP_BOOTSTRAP_AUTOSTART, Boolean.FALSE));

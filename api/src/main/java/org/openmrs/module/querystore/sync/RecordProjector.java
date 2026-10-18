@@ -12,8 +12,6 @@ package org.openmrs.module.querystore.sync;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.openmrs.BaseOpenmrsData;
 import org.openmrs.module.querystore.SafeLog;
 import org.openmrs.module.querystore.SkipLogFormat;
@@ -46,7 +44,6 @@ import org.openmrs.module.querystore.serialization.ClinicalRecordSerializer;
  */
 public final class RecordProjector {
 
-	private static final Log log = LogFactory.getLog(RecordProjector.class);
 
 	private RecordProjector() {
 	}

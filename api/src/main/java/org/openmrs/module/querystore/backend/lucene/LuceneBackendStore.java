@@ -26,8 +26,6 @@ import java.util.PriorityQueue;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
@@ -90,8 +88,6 @@ import org.openmrs.util.OpenmrsUtil;
  * Decision 3's "uniformity is the default" principle — no Lucene-specific override.
  */
 public class LuceneBackendStore implements BackendStore, Closeable {
-
-	private static final Log log = LogFactory.getLog(LuceneBackendStore.class);
 
 	private static final int RECOMMENDED_MAX_CORPUS = 5_000_000;
 

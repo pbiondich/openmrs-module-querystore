@@ -358,7 +358,8 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 
 	/**
 	 * Prototype: collapse, recency sort, facets and paging all run here, over a candidate pool of the
-	 * top {@code querystore.query.candidatePool} backend hits (or the whole chart for a recency browse). Each has a
+	 * top {@code querystore.query.candidatePool} backend hits (or the whole chart for a recency browse).
+	 * Each has a
 	 * backend-native form that would scale better, noted where it happens.
 	 */
 	@Override
@@ -506,7 +507,7 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 			}
 		}
 
-		Map<String, List<QueryDocument>> chartByConcept = anyConcept ? chartByConcept(spec)
+		Map<String, List<QueryDocument>> chartByConcept = anyConcept ? chartByConcept(spec, pool)
 		        : Collections.<String, List<QueryDocument>> emptyMap();
 		List<QueryResult.ConceptGroup> groups = new ArrayList<>(byKey.size());
 		for (List<QueryResult.Hit> members : byKey.values()) {
@@ -594,9 +595,18 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 	}
 
 	/** The patient's chart (within the spec's types), newest first, indexed by concept. */
-	private Map<String, List<QueryDocument>> chartByConcept(QuerySpec spec) {
+	private Map<String, List<QueryDocument>> chartByConcept(QuerySpec spec, List<QueryResult.Hit> pool) {
+		// A recency browse's pool already is the chart within the spec's types; read it again only for a
+		// search, whose pool holds just the matches.
+		List<QueryDocument> chart;
+		if (spec.getQuery() == null) {
+			chart = new ArrayList<>(pool.size());
+			pool.forEach(h -> chart.add(h.getDocument()));
+		} else {
+			chart = backend.findAllByPatient(spec.getPatientUuid());
+		}
 		Map<String, List<QueryDocument>> out = new HashMap<>();
-		for (QueryDocument d : backend.findAllByPatient(spec.getPatientUuid())) {
+		for (QueryDocument d : chart) {
 			String concept = conceptUuid(d);
 			if (concept != null && (spec.getTypes().isEmpty() || spec.getTypes().contains(d.getResourceType()))) {
 				out.computeIfAbsent(concept, k -> new ArrayList<>()).add(d);

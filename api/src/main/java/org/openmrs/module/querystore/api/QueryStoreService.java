@@ -143,7 +143,8 @@ public interface QueryStoreService extends OpenmrsService {
 	 * patient stays under-projected until the global scheduled scan re-runs (or a write event for
 	 * a failed-type resource triggers single-doc indexing). Operators monitoring querystore should
 	 * watch for the "Per-patient projection of {type} failed" WARN log as the signal of an
-	 * under-projected patient; the patient's uuid is on a companion DEBUG line. A per-type-per-patient retry marker is tracked under
+	 * under-projected patient; the patient's uuid is on a companion DEBUG line.
+	 * A per-type-per-patient retry marker is tracked under
 	 * the ADR's "Lazy per-patient projection" open question.
 	 *
 	 * <p>Token-budget enforcement is the consumer's responsibility — v1 returns whatever the index
@@ -168,7 +169,8 @@ public interface QueryStoreService extends OpenmrsService {
 	 * paging (prototype consumer API for the omnibar; see {@link QuerySpec}). Same authorization as
 	 * {@link #searchByPatient}. A cold patient is projected first when {@link QuerySpec#isWait()},
 	 * else answered at once with an empty result whose {@link IndexStatus} says why: a background warm
-	 * is started where one can be, and a patient whose last warm failed is not retried here. Throws {@link IllegalArgumentException} for a type no
+	 * is started where one can be, and a patient whose last warm failed is not retried here.
+	 * Throws {@link IllegalArgumentException} for a type no
 	 * provider registers.
 	 *
 	 * <p>A {@code default} so existing implementers (test doubles) keep compiling, mirroring

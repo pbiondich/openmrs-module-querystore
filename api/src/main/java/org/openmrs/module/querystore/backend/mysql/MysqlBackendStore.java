@@ -32,8 +32,6 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.commons.collections4.ListUtils;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.openmrs.api.db.hibernate.DbSessionFactory;
 import org.openmrs.module.querystore.SafeLog;
 import org.openmrs.module.querystore.SkipLogFormat;
@@ -67,8 +65,6 @@ import org.openmrs.module.querystore.model.QueryDocument;
  * {@code last_modified} freshness guard makes each upsert idempotent under concurrent retries.
  */
 public class MysqlBackendStore implements BackendStore {
-
-	private static final Log log = LogFactory.getLog(MysqlBackendStore.class);
 
 	private static final int RECOMMENDED_MAX_CORPUS = 500_000;
 

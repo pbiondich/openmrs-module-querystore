@@ -16,6 +16,7 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import org.junit.Test;
@@ -188,7 +189,7 @@ public class BootstrapLauncherTest {
 	@Test
 	public void launchPatientWarm_collapsesRepeatsPerPatient_andReportsWarmingUntilTheTaskEnds() {
 		BootstrapLauncher launcher = new BootstrapLauncher();
-		final java.util.List<Runnable> tasks = new java.util.ArrayList<>();
+		final List<Runnable> tasks = new ArrayList<>();
 		launcher.setDaemonExecutor((task, token) -> tasks.add(task));
 		launcher.setDaemonToken(new DaemonToken("token-warm"));
 
@@ -275,7 +276,7 @@ public class BootstrapLauncherTest {
 
 	@Test
 	public void syncProjections_andBackgroundWarms_shareOneBound() {
-		java.util.List<Runnable> parked = new java.util.ArrayList<>();
+		List<Runnable> parked = new ArrayList<>();
 		BootstrapLauncher launcher = SynchronousLaunchers.parked(1, parked);
 		final int[] ran = { 0 };
 
@@ -292,7 +293,7 @@ public class BootstrapLauncherTest {
 
 	@Test
 	public void runWithProjectionSlot_releasesTheSlotWhenTheWorkThrows() {
-		java.util.List<Runnable> parked = new java.util.ArrayList<>();
+		List<Runnable> parked = new ArrayList<>();
 		BootstrapLauncher launcher = SynchronousLaunchers.parked(1, parked);
 
 		try {

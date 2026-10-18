@@ -12,7 +12,6 @@ package org.openmrs.module.querystore.sync;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.openmrs.api.context.Daemon;
 import org.openmrs.module.DaemonToken;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -40,7 +39,6 @@ import org.openmrs.module.querystore.SafeLog;
  */
 public class AfterCommitDispatcher {
 
-	private static final Log log = LogFactory.getLog(AfterCommitDispatcher.class);
 
 	private final SyncExecutor executor;
 

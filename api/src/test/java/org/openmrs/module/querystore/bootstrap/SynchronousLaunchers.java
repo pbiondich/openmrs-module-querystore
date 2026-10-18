@@ -9,6 +9,8 @@
  */
 package org.openmrs.module.querystore.bootstrap;
 
+import java.util.List;
+
 import org.openmrs.module.DaemonToken;
 
 /**
@@ -26,7 +28,7 @@ public final class SynchronousLaunchers {
 	 * handed to the executor and never run, so each holds its slot until the test runs it from
 	 * {@code parked}.
 	 */
-	public static BootstrapLauncher parked(int slots, java.util.List<Runnable> parked) {
+	public static BootstrapLauncher parked(int slots, List<Runnable> parked) {
 		BootstrapLauncher launcher = new BootstrapLauncher();
 		launcher.setMaxConcurrentProjections(slots);
 		launcher.setDaemonExecutor((task, token) -> parked.add(task));

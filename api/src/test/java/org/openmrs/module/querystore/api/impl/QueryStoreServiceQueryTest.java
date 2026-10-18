@@ -257,6 +257,21 @@ public class QueryStoreServiceQueryTest {
 	}
 
 	@Test
+	public void recencyBrowse_collapsedByConcept_groupsTheWholeChartNewestFirst() {
+		index(obs("cd4-1", CD4, "CD4 count: 300.0 cells/µL", 300.0, "2025-01-01"));
+		index(obs("cd4-2", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-01-01"));
+		index(doc("condition", "cond-1", MALARIA, "Malaria: active", "2025-06-01"));
+
+		List<QueryResult.ConceptGroup> groups = service.query(QuerySpec.forPatient(PATIENT).sort(QuerySpec.Sort.RECENT)
+		        .collapse(QuerySpec.Collapse.CONCEPT).build()).getGroups();
+
+		assertEquals(Arrays.asList(CD4, MALARIA),
+		    groups.stream().map(QueryResult.ConceptGroup::getConceptUuid).collect(Collectors.toList()));
+		assertEquals(2, groups.get(0).getCount());
+		assertEquals("cd4-2", groups.get(0).getLatest().getDocument().getResourceUuid());
+	}
+
+	@Test
 	public void collapseByConcept_keepsConceptlessDocumentsAsGroupsOfOne() {
 		index(obs("cd4-1", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-03-12"));
 		index(doc("encounter", "enc-1", null, "Encounter: HIV clinic, CD4 drawn", "2026-03-12"));

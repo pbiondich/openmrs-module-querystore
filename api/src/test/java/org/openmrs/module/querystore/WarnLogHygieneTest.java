@@ -21,7 +21,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import org.junit.Test;
@@ -44,28 +43,14 @@ public class WarnLogHygieneTest {
 
 	@Test
 	public void noWarnStatementLogsAPatientOrEncounterUuid() throws IOException {
-		List<Path> roots = new ArrayList<>();
-		for (String root : new String[] { "src/main/java", "../omod/src/main/java" }) {
-			if (Files.isDirectory(Paths.get(root))) {
-				roots.add(Paths.get(root));
-			}
-		}
-		assertTrue("expected to run from the api module directory", !roots.isEmpty());
-
 		List<String> offenders = new ArrayList<>();
 		int scanned = 0;
-		for (Path root : roots) {
-			List<Path> files;
-			try (Stream<Path> walk = Files.walk(root)) {
-				files = walk.filter(p -> p.toString().endsWith(".java")).collect(Collectors.toList());
-			}
-			for (Path file : files) {
-				Matcher warn = WARN_STATEMENT.matcher(new String(Files.readAllBytes(file), StandardCharsets.UTF_8));
-				while (warn.find()) {
-					scanned++;
-					if (IDENTIFYING_VARIABLE.matcher(warn.group(1)).find()) {
-						offenders.add(file.getFileName() + ": log.warn(" + warn.group(1).replaceAll("\\s+", " ") + ")");
-					}
+		for (Path file : sourceFiles()) {
+			Matcher warn = WARN_STATEMENT.matcher(new String(Files.readAllBytes(file), StandardCharsets.UTF_8));
+			while (warn.find()) {
+				scanned++;
+				if (IDENTIFYING_VARIABLE.matcher(warn.group(1)).find()) {
+					offenders.add(file.getFileName() + ": log.warn(" + warn.group(1).replaceAll("\\s+", " ") + ")");
 				}
 			}
 		}
@@ -114,6 +99,7 @@ public class WarnLogHygieneTest {
 		assertEquals("WARN/ERROR statements that carry a raw exception; use SafeLog", new ArrayList<String>(), offenders);
 	}
 
+	/** Every main source file in api and omod; fails if none is found, so a clean scan means something. */
 	private static List<Path> sourceFiles() throws IOException {
 		List<Path> files = new ArrayList<>();
 		for (String root : new String[] { "src/main/java", "../omod/src/main/java" }) {
@@ -123,6 +109,7 @@ public class WarnLogHygieneTest {
 				}
 			}
 		}
+		assertTrue("expected to run from the api module directory and find its sources", !files.isEmpty());
 		return files;
 	}
 }
