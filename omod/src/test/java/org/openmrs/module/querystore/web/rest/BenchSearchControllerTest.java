@@ -229,6 +229,48 @@ public class BenchSearchControllerTest {
 	}
 
 	@Test
+	public void benchSearch_filteredBranch_emitsRowsOnlyForAnIndexedChart_andNeverRetriesAFailedOne() {
+		// code r1 S2. Get Patients and Get Conditions: the query branch.
+		Context.setUserContext(new UserContext(null) {
+
+			@Override
+			public User getAuthenticatedUser() {
+				return new User();
+			}
+
+			@Override
+			public boolean hasPrivilege(String privilege) {
+				return PrivilegeConstants.GET_PATIENTS.equals(privilege) || PrivilegeConstants.GET_CONDITIONS.equals(privilege);
+			}
+		});
+		QueryDocument condition = new QueryDocument();
+		condition.setResourceType("condition");
+		condition.setResourceUuid("cond-1");
+		condition.setText("Condition: HIV");
+		List<org.openmrs.module.querystore.api.QueryResult.Hit> hits = Collections
+		        .singletonList(new org.openmrs.module.querystore.api.QueryResult.Hit(condition, 1.0));
+		QueryStoreService queryStore = mock(QueryStoreService.class);
+		when(queryStore.query(org.mockito.ArgumentMatchers.any(org.openmrs.module.querystore.api.QuerySpec.class)))
+		        .thenReturn(new org.openmrs.module.querystore.api.QueryResult(
+		                org.openmrs.module.querystore.api.IndexStatus.PROJECTING, hits, null, null))
+		        .thenReturn(new org.openmrs.module.querystore.api.QueryResult(
+		                org.openmrs.module.querystore.api.IndexStatus.INDEXED, hits, null, null));
+		controller.setQueryStoreService(queryStore);
+
+		List<?> projecting = (List<?>) controller.benchSearch("patient-uuid", "hiv", 50, false).getBody();
+		List<?> indexed = (List<?>) controller.benchSearch("patient-uuid", "hiv", 50, false).getBody();
+
+		assertTrue("a projecting chart contributes no bench rows", projecting.isEmpty());
+		assertEquals(1, indexed.size());
+		org.mockito.ArgumentCaptor<org.openmrs.module.querystore.api.QuerySpec> spec = org.mockito.ArgumentCaptor
+		        .forClass(org.openmrs.module.querystore.api.QuerySpec.class);
+		verify(queryStore, org.mockito.Mockito.times(2)).query(spec.capture());
+		assertFalse("the bench never starts a failed chart's retry", spec.getValue().isRetryFailed());
+		verify(queryStore, never()).reindex(anyString());
+		verify(queryStore, never()).warm(anyString());
+	}
+
+	@Test
 	public void benchSearch_returns400_whenQueryBlank() {
 		authenticate();
 		QueryStoreService queryStore = mock(QueryStoreService.class);

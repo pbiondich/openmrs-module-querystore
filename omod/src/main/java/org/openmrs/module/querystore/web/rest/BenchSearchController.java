@@ -68,7 +68,9 @@ public class BenchSearchController {
 	 * patient core shows the caller and not voided (404 otherwise, one answer for a bad shape, an
 	 * unknown uuid and a voided patient); and only the types the caller could read through core. A
 	 * caller who can read every type gets exactly the {@code searchByPatient} call the benchmark has
-	 * always timed; one who cannot is searched through {@code query} over the readable types.
+	 * always timed; one who cannot is searched through {@code query} over the readable types, gets
+	 * rows only once the chart is indexed (none while it projects or after it failed), and never
+	 * starts a failed chart's retry.
 	 *
 	 * <p>{@code limit} defaults to 50 and is clamped to 1..200. The {@code X-Querystore-Millis}
 	 * response header is the wall time in ms of the index work: the search, plus with {@code cold}
@@ -119,10 +121,15 @@ public class BenchSearchController {
 		if (types.isEmpty()) {
 			docs = service.searchByPatient(patientUuid, query, clampedLimit);
 		} else {
+			// No failed-chart retry (it would be timed as search), and rows only from an indexed chart:
+			// the bench body has no status to say a chart was partial.
 			docs = new ArrayList<QueryDocument>();
-			for (QueryResult.Hit hit : service.query(QuerySpec.forPatient(patientUuid).query(query)
-			        .mode(QuerySpec.Mode.HYBRID).types(types).limit(clampedLimit).build()).getHits()) {
-				docs.add(hit.getDocument());
+			QueryResult result = service.query(QuerySpec.forPatient(patientUuid).query(query).mode(QuerySpec.Mode.HYBRID)
+			        .types(types).limit(clampedLimit).retryFailed(false).build());
+			if (result.getStatus() == IndexStatus.INDEXED) {
+				for (QueryResult.Hit hit : result.getHits()) {
+					docs.add(hit.getDocument());
+				}
 			}
 		}
 		long millis = (System.nanoTime() - start) / 1_000_000;

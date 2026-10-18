@@ -787,6 +787,23 @@ public class QueryStoreServiceQueryTest {
 	}
 
 	@Test
+	public void aSpecWithFailedRetryOff_leavesAFailedChartFailed_andStartsNothing() {
+		// code r1 S2: the bench's filtered search times the search, so it must not start a retry.
+		long[] now = { 1_000_000L };
+		service.setBootstrapLauncher(SynchronousLaunchers.create(() -> now[0]));
+		service.warm(PATIENT);
+		assertEquals(IndexStatus.FAILED, service.getIndexStatus(PATIENT));
+		now[0] += BootstrapLauncher.RETRY_BACKOFF_BASE_MILLIS;
+
+		QueryResult result = service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD).retryFailed(false).build());
+
+		assertEquals(IndexStatus.FAILED, result.getStatus());
+		assertTrue(result.getHits().isEmpty());
+		assertTrue("no retry started", bootstrap.reindexCalls.isEmpty());
+		assertTrue("on by default", spec("cd4").build().isRetryFailed());
+	}
+
+	@Test
 	public void aPoisonChart_isRetriedOnItsBackoffSchedule_notOnEveryKeystroke() {
 		long[] now = { 1_000_000L };
 		service.setBootstrapLauncher(SynchronousLaunchers.create(() -> now[0]));

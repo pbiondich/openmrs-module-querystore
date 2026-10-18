@@ -415,7 +415,7 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 		requireKnownTypes(spec.getTypes());
 		String patientUuid = spec.getPatientUuid();
 		IndexStatus status = getIndexStatus(patientUuid);
-		if (status == IndexStatus.FAILED) {
+		if (status == IndexStatus.FAILED && spec.isRetryFailed()) {
 			// Retried by a warm once its backoff has run out (the omnibar's searches are the only warms
 			// it gets), not on every keystroke. Until it re-projects, its chart may be partial.
 			warm(patientUuid);

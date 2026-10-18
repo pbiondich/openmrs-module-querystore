@@ -72,6 +72,8 @@ public final class QuerySpec {
 
 	private final boolean partialResults;
 
+	private final boolean retryFailed;
+
 	private QuerySpec(Builder b) {
 		this.patientUuid = b.patientUuid;
 		this.query = StringUtils.trimToNull(b.query);
@@ -85,6 +87,7 @@ public final class QuerySpec {
 		this.offset = b.offset;
 		this.wait = b.wait;
 		this.partialResults = b.partialResults;
+		this.retryFailed = b.retryFailed;
 	}
 
 	public String getPatientUuid() {
@@ -144,6 +147,15 @@ public final class QuerySpec {
 		return partialResults;
 	}
 
+	/**
+	 * Whether a {@link IndexStatus#FAILED} chart past its retry backoff is retried by this query (in
+	 * the background, or joined when waiting). On by default; off for a caller timing the search,
+	 * which must not time a re-projection, and then a failed chart answers empty and starts nothing.
+	 */
+	public boolean isRetryFailed() {
+		return retryFailed;
+	}
+
 	public static Builder forPatient(String patientUuid) {
 		return new Builder(patientUuid);
 	}
@@ -171,6 +183,8 @@ public final class QuerySpec {
 		private boolean wait = true;
 
 		private boolean partialResults;
+
+		private boolean retryFailed = true;
 
 		private Builder(String patientUuid) {
 			this.patientUuid = patientUuid;
@@ -224,6 +238,11 @@ public final class QuerySpec {
 
 		public Builder partialResults(boolean partialResults) {
 			this.partialResults = partialResults;
+			return this;
+		}
+
+		public Builder retryFailed(boolean retryFailed) {
+			this.retryFailed = retryFailed;
 			return this;
 		}
 
