@@ -181,7 +181,7 @@ public abstract class HibernateTypeBootstrapper<T> extends TypeBootstrapper<T> {
 			}
 			catch (RuntimeException rowError) {
 				skipped++;
-				SafeLog.warn(log, SkipLogFormat.format("bootstrap", getResourceType(), uuid, null,
+				SafeLog.warn(HibernateTypeBootstrapper.class, SkipLogFormat.format("bootstrap", getResourceType(), uuid, null,
 				    "skipped dump-orphaned record (dangling FK): " + rowError.getMessage()), rowError);
 			}
 		}

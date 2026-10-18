@@ -139,7 +139,7 @@ final class LuceneSchemaManager implements AutoCloseable {
 					names.add(name);
 				}
 				catch (RuntimeException ex) {
-					SafeLog.warn(log, "Could not open Lucene index directory '" + name + "'; skipping for"
+					SafeLog.warn(LuceneSchemaManager.class, "Could not open Lucene index directory '" + name + "'; skipping for"
 					        + " this enumeration. A type-specific ensureWriter call will surface"
 					        + " the underlying error to the caller of that path.", ex);
 				}
@@ -160,7 +160,7 @@ final class LuceneSchemaManager implements AutoCloseable {
 			catch (IOException e) {
 				// Continue closing siblings — but log: a stuck writer here usually means a held
 				// index lock, which an operator chasing "module won't restart" needs to see.
-				SafeLog.warn(log, "Could not close Lucene writer " + entry.getKey() + " during shutdown", e);
+				SafeLog.warn(LuceneSchemaManager.class, "Could not close Lucene writer " + entry.getKey() + " during shutdown", e);
 			}
 		}
 		writers.clear();

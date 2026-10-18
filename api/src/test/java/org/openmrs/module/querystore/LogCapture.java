@@ -35,6 +35,8 @@ public final class LogCapture implements AutoCloseable {
 
 	private final List<String> lines = new CopyOnWriteArrayList<>();
 
+	private final List<String> sources = new CopyOnWriteArrayList<>();
+
 	private final String loggerName;
 
 	private final AbstractAppender appender;
@@ -47,6 +49,8 @@ public final class LogCapture implements AutoCloseable {
 			public void append(LogEvent event) {
 				lines.add(event.getLevel() + " " + event.getMessage().getFormattedMessage()
 				        + (event.getThrown() != null ? THROWN : ""));
+				StackTraceElement source = event.getSource();
+				sources.add(source == null ? "" : source.getClassName());
 			}
 		};
 		appender.start();
@@ -65,6 +69,11 @@ public final class LogCapture implements AutoCloseable {
 	/** Every captured line as {@code "LEVEL message"}. */
 	public List<String> lines() {
 		return new ArrayList<>(lines);
+	}
+
+	/** The class each captured line was logged from, as the log pattern's location would print it. */
+	public List<String> sources() {
+		return new ArrayList<>(sources);
 	}
 
 	/** Captured lines at the given level, message only. */

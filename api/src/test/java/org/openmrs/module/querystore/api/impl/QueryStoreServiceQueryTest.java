@@ -142,6 +142,31 @@ public class QueryStoreServiceQueryTest {
 		assertEquals("condition", conditions.getHits().get(0).getDocument().getResourceType());
 	}
 
+	@Test
+	public void unknownType_isRefused_andCreatesNoIndex() throws IOException {
+		// The Lucene backend creates an index directory for any well-formed type a search names, so an
+		// unchecked type from a caller would create one.
+		index(obs("cd4-1", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-03-12"));
+		List<String> before = indexDirectories();
+
+		try {
+			service.query(spec("cd4").types(Collections.singletonList("faketype")).build());
+			fail("expected IllegalArgumentException for an unregistered type");
+		}
+		catch (IllegalArgumentException expected) {
+			assertTrue(expected.getMessage().contains("faketype"));
+		}
+		assertEquals("no index was created for the unknown type", before, indexDirectories());
+		assertEquals(1, service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD)
+		        .types(Collections.singletonList("obs")).build()).getHits().size());
+	}
+
+	private List<String> indexDirectories() throws IOException {
+		try (Stream<Path> children = Files.list(indexRoot)) {
+			return children.map(p -> p.getFileName().toString()).sorted().collect(Collectors.toList());
+		}
+	}
+
 	// ---------- sort ----------
 
 	@Test
@@ -641,7 +666,7 @@ public class QueryStoreServiceQueryTest {
 		@Override public void bootstrap() { }
 		@Override public void bootstrap(String resourceType) { }
 		@Override public void resyncType(String resourceType) { }
-		@Override public List<String> getResourceTypeNames() { return Collections.emptyList(); }
+		@Override public List<String> getResourceTypeNames() { return Arrays.asList("obs", "condition", "encounter"); }
 		@Override public void ensureIndexed(String patientUuid) {
 			ensureIndexedCalls.add(patientUuid);
 			if (onEnsureIndexed != null) {

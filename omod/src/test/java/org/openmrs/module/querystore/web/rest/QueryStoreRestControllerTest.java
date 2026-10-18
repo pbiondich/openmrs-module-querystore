@@ -21,10 +21,13 @@ import java.util.HashMap;
 import java.util.Map;
 
 import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
+import org.openmrs.Patient;
 import org.openmrs.User;
 import org.openmrs.api.APIAuthenticationException;
+import org.openmrs.api.PatientService;
 import org.openmrs.api.context.Context;
 import org.openmrs.api.context.ContextAuthenticationException;
 import org.openmrs.api.context.UserContext;
@@ -54,6 +57,24 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 public class QueryStoreRestControllerTest {
 
 	private final QueryStoreRestController controller = new QueryStoreRestController();
+
+	/**
+	 * The patient endpoints first ask core for the patient. Every uuid but {@link #UNKNOWN_PATIENT} is
+	 * one core returns, and the registered types are obs and condition; tests that need otherwise
+	 * inject their own.
+	 */
+	@Before
+	public void knownPatientsAndTypes() {
+		PatientService patients = mock(PatientService.class);
+		when(patients.getPatientByUuid(org.mockito.ArgumentMatchers.anyString())).thenReturn(new Patient());
+		when(patients.getPatientByUuid(UNKNOWN_PATIENT)).thenReturn(null);
+		controller.setPatientService(patients);
+		BootstrapService bootstrap = mock(BootstrapService.class);
+		when(bootstrap.getResourceTypeNames()).thenReturn(Arrays.asList("obs", "condition"));
+		controller.setBootstrapService(bootstrap);
+	}
+
+	private static final String UNKNOWN_PATIENT = "no-such-patient";
 
 	@After
 	public void clearContext() {
@@ -515,6 +536,49 @@ public class QueryStoreRestControllerTest {
 			}
 		});
 		controller.search("patient-uuid", "cd4", null, null, null, null, null, null, null, true);
+	}
+
+	@Test
+	public void patientEndpoints_return404ForAUuidCoreDoesNotReturn_withoutTouchingTheService() {
+		authenticate();
+		QueryStoreService queryStore = mock(QueryStoreService.class);
+		controller.setQueryStoreService(queryStore);
+
+		Runnable[] calls = {
+		        () -> controller.warm(UNKNOWN_PATIENT),
+		        () -> controller.status(UNKNOWN_PATIENT),
+		        () -> controller.recent(UNKNOWN_PATIENT, null, null, false),
+		        () -> controller.search(UNKNOWN_PATIENT, "cd4", null, null, null, null, null, null, null, true) };
+		for (Runnable call : calls) {
+			try {
+				call.run();
+				throw new AssertionError("expected a 404");
+			}
+			catch (QueryStoreRestController.PatientNotFoundException e) {
+				ResponseEntity<Object> response = controller.handlePatientNotFound(e);
+				assertEquals(HttpStatus.NOT_FOUND, response.getStatusCode());
+				assertEquals("Patient not found", errorOf(response));
+			}
+		}
+		org.mockito.Mockito.verifyNoInteractions(queryStore);
+	}
+
+	@Test
+	public void unknownTypes_andAnOverlongQuery_are400s() {
+		authenticate();
+		QueryStoreService queryStore = mock(QueryStoreService.class);
+		controller.setQueryStoreService(queryStore);
+		StringBuilder longQuery = new StringBuilder();
+		for (int i = 0; i <= QueryStoreRestController.MAX_QUERY_LENGTH; i++) {
+			longQuery.append('a');
+		}
+
+		assertEquals("Unknown type 'faketype'",
+		    badRequest(() -> controller.search("p", "cd4", null, "obs,faketype", null, null, null, null, null, true)));
+		assertEquals("Unknown type 'faketype'", badRequest(() -> controller.recent("p", null, "faketype", false)));
+		assertEquals("q must be at most 500 characters",
+		    badRequest(() -> controller.search("p", longQuery.toString(), null, null, null, null, null, null, null, true)));
+		org.mockito.Mockito.verifyNoInteractions(queryStore);
 	}
 
 	/** Runs a call expected to fail parameter validation and returns the 400 body's error. */

@@ -37,7 +37,8 @@ import org.springframework.context.event.EventListener;
 
 /**
  * Events-first sync consumer (ADR Decision 12): subscribes to core's #6084 {@code *ServiceEvent}s
- * and projects each saved/voided/purged entity into the read store through {@link RecordProjector}.
+ * and projects each saved/voided/purged entity into the read store through {@link RecordProjector},
+ * except obs, which are re-read after commit (see {@link #reconcileObs}).
  * This is the sole sync path — the AOP migration bridge was removed once events was verified
  * end-to-end.
  *
@@ -46,12 +47,14 @@ import org.springframework.context.event.EventListener;
  * open — exactly where serialization must happen for lazy navigations to resolve. The expensive
  * embed + write is deferred to after commit by {@link AfterCommitDispatcher} inside the projector,
  * so the clinical thread is not blocked on embedding and nothing is indexed for a rolled-back
- * transaction. (Verified end-to-end against a real 2.9 server by {@code CoreServiceEventTest}.)
+ * transaction. (Verified end-to-end against a real 2.9 server by {@code CoreServiceEventTest}.) Obs
+ * are the exception: the handler records only their uuids, and after commit they are re-read and
+ * serialized on the dispatcher's daemon thread, against that thread's own session.
  *
  * <p><b>Disposition.</b> Every event but purge maps to {@code project(entity, purge=false)} — except
  * the {@code PersonMergeLog} save, which routes to merge reconciliation (see Patient merge below).
  * For a projected event the entity's own {@code voided} flag — set before the event publishes —
- * drives index-vs-delete (ADR Decision 10). {@code PurgeServiceEvent} maps to {@code purge=true}
+ * drives index-vs-delete (ADR Decision 10); for an obs, its committed {@code voided} flag does. {@code PurgeServiceEvent} maps to {@code purge=true}
  * (delete + patient sweep). {@code Retire}/{@code Unretire} are handled for completeness but are inert
  * for the current indexed types, which are all {@code OpenmrsData}.
  *
@@ -124,7 +127,7 @@ public class CoreServiceEventListener {
 		catch (RuntimeException e) {
 			// Best-effort per ADR Decision 12: a projection failure must not
 			// propagate back into the clinical transaction that published the event.
-			SafeLog.warn(log, "Events consumer failed projecting " + data.getClass().getSimpleName()
+			SafeLog.warn(CoreServiceEventListener.class, "Events consumer failed projecting " + data.getClass().getSimpleName()
 			        + "; swallowing per ADR Decision 12", e);
 		}
 	}
@@ -198,7 +201,7 @@ public class CoreServiceEventListener {
 					}
 				}
 				catch (RuntimeException e) {
-					SafeLog.warn(log, "Skipping reconcile for obs/" + uuid + " due to failure", e);
+					SafeLog.warn(CoreServiceEventListener.class, "Skipping reconcile for obs/" + uuid + " due to failure", e);
 				}
 			}
 		});

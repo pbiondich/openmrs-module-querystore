@@ -82,7 +82,7 @@ public class AfterCommitDispatcher {
 				// conditional-upsert-by-version invariant (ADR Decision 3) means a missed
 				// projection is corrected by the next save or the bootstrap pass — neither
 				// overwrites the freshest document.
-				SafeLog.warn(log, "After-commit projection task failed; swallowing per ADR Decision 12", e);
+				SafeLog.warn(AfterCommitDispatcher.class, "After-commit projection task failed; swallowing per ADR Decision 12", e);
 			}
 		};
 	}

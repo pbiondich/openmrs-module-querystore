@@ -250,7 +250,7 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 			// Index-failure must not block search; whatever did get indexed (or what was already
 			// present) is still searchable. Empty results are the same outcome as before this
 			// feature shipped.
-			SafeLog.warn(log, "Auto-index for a cold patient failed; serving search with whatever is indexed", e);
+			SafeLog.warn(QueryStoreServiceImpl.class, "Auto-index for a cold patient failed; serving search with whatever is indexed", e);
 			log.debug("Auto-index failed for patient " + patientUuid);
 		}
 	}
@@ -336,6 +336,7 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 		if (backend == null) {
 			return QueryResult.empty(IndexStatus.NOT_INDEXED, spec);
 		}
+		requireKnownTypes(spec.getTypes());
 		String patientUuid = spec.getPatientUuid();
 		IndexStatus status = getIndexStatus(patientUuid);
 		if (status != IndexStatus.INDEXED) {
@@ -382,6 +383,22 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 			emitRetrievalLog(spec.getQuery(), logged);
 		}
 		return new QueryResult(status, hits, groups, typeCounts);
+	}
+
+	/**
+	 * Refuses a type no provider registers. The Lucene and MySQL backends create an index or table
+	 * for any well-formed type a search names, so an unchecked name would create one.
+	 */
+	private void requireKnownTypes(List<String> types) {
+		if (types.isEmpty()) {
+			return;
+		}
+		List<String> known = bootstrapService().getResourceTypeNames();
+		for (String type : types) {
+			if (!known.contains(type)) {
+				throw new IllegalArgumentException("Unknown resource type: " + type);
+			}
+		}
 	}
 
 	private List<QueryResult.Hit> candidates(QuerySpec spec) {

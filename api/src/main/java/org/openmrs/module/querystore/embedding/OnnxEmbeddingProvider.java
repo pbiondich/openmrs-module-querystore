@@ -161,7 +161,7 @@ public class OnnxEmbeddingProvider implements EmbeddingProvider {
 			session.close();
 		}
 		catch (OrtException e) {
-			SafeLog.warn(log, "Error closing ONNX session", e);
+			SafeLog.warn(OnnxEmbeddingProvider.class, "Error closing ONNX session", e);
 		}
 		session = null;
 		if (sessionOptions != null) {
@@ -182,7 +182,7 @@ public class OnnxEmbeddingProvider implements EmbeddingProvider {
 			querySession.close();
 		}
 		catch (OrtException e) {
-			SafeLog.warn(log, "Error closing query ONNX session", e);
+			SafeLog.warn(OnnxEmbeddingProvider.class, "Error closing query ONNX session", e);
 		}
 		querySession = null;
 		if (querySessionOptions != null) {
@@ -266,7 +266,7 @@ public class OnnxEmbeddingProvider implements EmbeddingProvider {
 					result.close();
 				}
 				catch (Exception e) {
-					SafeLog.warn(log, "Error closing ONNX result", e);
+					SafeLog.warn(OnnxEmbeddingProvider.class, "Error closing ONNX result", e);
 				}
 			}
 			for (OnnxTensor tensor : inputs.values()) {
@@ -274,7 +274,7 @@ public class OnnxEmbeddingProvider implements EmbeddingProvider {
 					tensor.close();
 				}
 				catch (Exception e) {
-					SafeLog.warn(log, "Error closing ONNX tensor", e);
+					SafeLog.warn(OnnxEmbeddingProvider.class, "Error closing ONNX tensor", e);
 				}
 			}
 		}

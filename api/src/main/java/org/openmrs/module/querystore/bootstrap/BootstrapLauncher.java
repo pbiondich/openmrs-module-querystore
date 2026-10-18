@@ -151,7 +151,7 @@ public class BootstrapLauncher {
 			catch (RuntimeException e) {
 				// Fire-and-forget on a daemon thread — no caller upstack to surface to, so log here
 				// (mirrors the after-commit sync path's log-and-swallow per ADR Decision 12).
-				SafeLog.error(log, "Type re-sync failed for " + resourceType, e);
+				SafeLog.error(BootstrapLauncher.class, "Type re-sync failed for " + resourceType, e);
 			}
 		}, token);
 		return true;
@@ -202,7 +202,7 @@ public class BootstrapLauncher {
 				catch (RuntimeException e) {
 					// Fire-and-forget: no caller upstack, so the failure is kept for the status read.
 					failedPatients.add(patientUuid);
-					SafeLog.warn(log, "Background patient warm failed (patient uuid at DEBUG)", e);
+					SafeLog.warn(BootstrapLauncher.class, "Background patient warm failed (patient uuid at DEBUG)", e);
 					log.debug("Background warm failed for patient " + patientUuid);
 				}
 				finally {

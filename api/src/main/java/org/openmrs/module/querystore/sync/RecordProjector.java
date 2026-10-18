@@ -23,6 +23,7 @@ import org.openmrs.module.querystore.serialization.ClinicalRecordSerializer;
 /**
  * The {@code serialize → partition → dispatch} projection the events consumer
  * ({@code CoreServiceEventListener}) runs to write a saved/voided/purged record into the read store.
+ * Obs other than a purge take {@link ObsVersions}' committed-state path instead.
  * (It was originally shared with the AOP migration bridge to guarantee parity; the bridge has since
  * been removed and events is the sole sync path — ADR Decision 12.)
  *
@@ -81,7 +82,7 @@ public final class RecordProjector {
 					indexer.index(doc);
 				}
 				catch (RuntimeException e) {
-					SafeLog.warn(log, "Skipping index for " + resourceType + "/"
+					SafeLog.warn(RecordProjector.class, "Skipping index for " + resourceType + "/"
 					        + SkipLogFormat.loggableUuid(resourceType, doc.getResourceUuid())
 					        + " due to failure", e);
 				}
@@ -91,7 +92,7 @@ public final class RecordProjector {
 					indexer.delete(resourceType, uuid);
 				}
 				catch (RuntimeException e) {
-					SafeLog.warn(log, "Skipping delete for " + resourceType + "/" + SkipLogFormat.loggableUuid(resourceType, uuid)
+					SafeLog.warn(RecordProjector.class, "Skipping delete for " + resourceType + "/" + SkipLogFormat.loggableUuid(resourceType, uuid)
 					        + " due to failure", e);
 				}
 			}
@@ -100,7 +101,7 @@ public final class RecordProjector {
 					indexer.bulkDeleteByPatient(bulkDeletePatientUuid);
 				}
 				catch (RuntimeException e) {
-					SafeLog.warn(log, "Skipping bulk-delete-by-patient due to failure", e);
+					SafeLog.warn(RecordProjector.class, "Skipping bulk-delete-by-patient due to failure", e);
 				}
 			}
 		});

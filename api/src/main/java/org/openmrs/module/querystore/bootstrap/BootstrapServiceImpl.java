@@ -133,7 +133,7 @@ public class BootstrapServiceImpl extends BaseOpenmrsService implements Bootstra
 				runOne(resourceType, providers, false);
 			}
 			catch (RuntimeException e) {
-				SafeLog.warn(log, "Bootstrap of " + resourceType + " failed; continuing with remaining types", e);
+				SafeLog.warn(BootstrapServiceImpl.class, "Bootstrap of " + resourceType + " failed; continuing with remaining types", e);
 			}
 		}
 	}
@@ -220,7 +220,7 @@ public class BootstrapServiceImpl extends BaseOpenmrsService implements Bootstra
 				}
 			}
 			catch (RuntimeException e) {
-				SafeLog.warn(log, "Per-patient projection of " + resourceType
+				SafeLog.warn(BootstrapServiceImpl.class, "Per-patient projection of " + resourceType
 				        + " failed; continuing with remaining types (patient uuid at DEBUG)", e);
 				log.debug("Per-patient projection of " + resourceType + " failed for patient " + patientUuid);
 			}
@@ -272,7 +272,7 @@ public class BootstrapServiceImpl extends BaseOpenmrsService implements Bootstra
 			return counter.getAsLong();
 		}
 		catch (RuntimeException e) {
-			SafeLog.warn(log, operation + " failed for resource type '" + resourceType
+			SafeLog.warn(BootstrapServiceImpl.class, operation + " failed for resource type '" + resourceType
 			        + "'; reporting its drift as unknown", e);
 			return -1L;
 		}

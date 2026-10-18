@@ -13,13 +13,9 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.junit.Test;
 
 public class SafeLogTest {
-
-	private static final Log log = LogFactory.getLog(SafeLogTest.class);
 
 	private static final String PATIENT = "0c1d2e3f-4a5b-4c6d-8e7f-901234567890";
 
@@ -29,7 +25,7 @@ public class SafeLogTest {
 		        new IllegalArgumentException("No row with the given identifier exists for patient " + PATIENT));
 
 		try (LogCapture capture = LogCapture.of(SafeLogTest.class)) {
-			SafeLog.warn(log, "Per-patient projection of obs failed", failure);
+			SafeLog.warn(SafeLogTest.class, "Per-patient projection of obs failed", failure);
 
 			assertEquals(1, capture.at("WARN").size());
 			String warn = capture.at("WARN").get(0);
@@ -44,9 +40,22 @@ public class SafeLogTest {
 	}
 
 	@Test
+	public void lines_areAttributedToTheCaller_notToSafeLog() {
+		// OpenMRS's log pattern prints the location (%C.%M(%L)); every WARN must not read "SafeLog".
+		try (LogCapture capture = LogCapture.of(SafeLogTest.class)) {
+			SafeLog.warn(SafeLogTest.class, "failed", new RuntimeException("x"));
+
+			assertEquals(2, capture.sources().size());
+			for (String source : capture.sources()) {
+				assertEquals(SafeLogTest.class.getName(), source);
+			}
+		}
+	}
+
+	@Test
 	public void error_isScrubbedTheSameWay() {
 		try (LogCapture capture = LogCapture.of(SafeLogTest.class)) {
-			SafeLog.error(log, "Unexpected error", new RuntimeException("bad uuid " + PATIENT));
+			SafeLog.error(SafeLogTest.class, "Unexpected error", new RuntimeException("bad uuid " + PATIENT));
 
 			assertEquals("Unexpected error [java.lang.RuntimeException: bad uuid <uuid> (stack at DEBUG)]",
 			    capture.at("ERROR").get(0));

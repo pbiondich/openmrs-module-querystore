@@ -9,8 +9,10 @@
  */
 package org.openmrs.module.querystore;
 
-import org.apache.commons.logging.Log;
-import org.slf4j.Logger;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.spi.ExtendedLogger;
 
 /**
  * Logs a failure at WARN or ERROR without the exception's stack or any uuid in its messages: an
@@ -18,8 +20,14 @@ import org.slf4j.Logger;
  * backend error echoing a document), and WARN and ERROR reach production logs by default. The line
  * carries the exception types and their uuid-scrubbed messages; the full throwable goes to DEBUG,
  * like the [QSEVAL] lines.
+ *
+ * <p>Logs to the owner class's logger, the same one its {@code log} field uses, and names this class
+ * as the logging boundary so the line's location is the caller's, not this class's (OpenMRS's log
+ * pattern prints the location).
  */
 public final class SafeLog {
+
+	private static final String FQCN = SafeLog.class.getName();
 
 	// Enough of a cause chain to name the real failure, without walking a pathological one.
 	private static final int MAX_CAUSES = 4;
@@ -27,24 +35,24 @@ public final class SafeLog {
 	private SafeLog() {
 	}
 
-	public static void warn(Log log, String message, Throwable t) {
-		log.warn(message + describe(t));
-		log.debug(message, t);
+	public static void warn(Class<?> owner, String message, Throwable t) {
+		log(owner, Level.WARN, message, t);
 	}
 
-	public static void error(Log log, String message, Throwable t) {
-		log.error(message + describe(t));
-		log.debug(message, t);
+	public static void error(Class<?> owner, String message, Throwable t) {
+		log(owner, Level.ERROR, message, t);
 	}
 
-	public static void warn(Logger log, String message, Throwable t) {
-		log.warn(message + describe(t));
-		log.debug(message, t);
-	}
-
-	public static void error(Logger log, String message, Throwable t) {
-		log.error(message + describe(t));
-		log.debug(message, t);
+	private static void log(Class<?> owner, Level level, String message, Throwable t) {
+		Logger logger = LogManager.getLogger(owner);
+		if (logger instanceof ExtendedLogger) {
+			ExtendedLogger extended = (ExtendedLogger) logger;
+			extended.logIfEnabled(FQCN, level, null, message + describe(t), (Throwable) null);
+			extended.logIfEnabled(FQCN, Level.DEBUG, null, message, t);
+		} else {
+			logger.log(level, message + describe(t));
+			logger.debug(message, t);
+		}
 	}
 
 	/** {@code " [Type: message; caused by Type: message]"}, uuids scrubbed; empty for no throwable. */

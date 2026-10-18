@@ -17,6 +17,7 @@ import java.util.Map;
 import org.apache.commons.lang3.StringUtils;
 import org.openmrs.api.APIAuthenticationException;
 import org.openmrs.api.APIException;
+import org.openmrs.api.PatientService;
 import org.openmrs.api.context.Context;
 import org.openmrs.api.context.ContextAuthenticationException;
 import org.openmrs.module.querystore.SafeLog;
@@ -221,10 +222,13 @@ public class QueryStoreRestController {
 	//
 	// The patient is always a path segment: there is no cross-patient search and no full-chart
 	// endpoint here (recent is capped at MAX_PAGE). Gated by Get Patients, the privilege the service
-	// methods themselves declare via @Authorized.
+	// methods themselves declare via @Authorized, and by core's own read of the patient (requirePatient).
 
 	/** Largest page the REST surface serves, so {@code recent} can't become a full-chart dump. */
 	static final int MAX_PAGE = 50;
+
+	/** Longest query text accepted: type-ahead and questions are short, and hybrid mode encodes it. */
+	static final int MAX_QUERY_LENGTH = 500;
 
 	/**
 	 * Starts projecting a never-indexed patient in the background and returns at once with
@@ -236,6 +240,7 @@ public class QueryStoreRestController {
 	@ResponseBody
 	public ResponseEntity<Object> warm(@PathVariable("patientUuid") String patientUuid) {
 		Context.requirePrivilege(PrivilegeConstants.GET_PATIENTS);
+		requirePatient(patientUuid);
 		IndexStatus status = queryStoreService().warm(patientUuid);
 		return statusResponse(status, status == IndexStatus.INDEXED ? HttpStatus.OK : HttpStatus.ACCEPTED);
 	}
@@ -245,6 +250,7 @@ public class QueryStoreRestController {
 	@ResponseBody
 	public ResponseEntity<Object> status(@PathVariable("patientUuid") String patientUuid) {
 		Context.requirePrivilege(PrivilegeConstants.GET_PATIENTS);
+		requirePatient(patientUuid);
 		return statusResponse(queryStoreService().getIndexStatus(patientUuid), HttpStatus.OK);
 	}
 
@@ -259,7 +265,8 @@ public class QueryStoreRestController {
 	        @RequestParam(value = "types", required = false) String types,
 	        @RequestParam(value = "wait", required = false, defaultValue = "false") boolean wait) {
 		Context.requirePrivilege(PrivilegeConstants.GET_PATIENTS);
-		QuerySpec spec = QuerySpec.forPatient(patientUuid).sort(QuerySpec.Sort.RECENT).types(splitTypes(types))
+		requirePatient(patientUuid);
+		QuerySpec spec = QuerySpec.forPatient(patientUuid).sort(QuerySpec.Sort.RECENT).types(knownTypes(types))
 		        .limit(pageSize(limit, 5)).wait(wait).build();
 		return new ResponseEntity<Object>(queryStoreService().query(spec).toMap(), HttpStatus.OK);
 	}
@@ -284,14 +291,18 @@ public class QueryStoreRestController {
 	        @RequestParam(value = "offset", required = false) Integer offset,
 	        @RequestParam(value = "wait", required = false, defaultValue = "true") boolean wait) {
 		Context.requirePrivilege(PrivilegeConstants.GET_PATIENTS);
+		requirePatient(patientUuid);
 		if (StringUtils.isBlank(q)) {
 			throw new BadParameterException("q is required");
+		}
+		if (q.length() > MAX_QUERY_LENGTH) {
+			throw new BadParameterException("q must be at most " + MAX_QUERY_LENGTH + " characters");
 		}
 		QuerySpec.Builder spec = QuerySpec.forPatient(patientUuid).query(q)
 		        .mode(parse(QuerySpec.Mode.class, "mode", mode, QuerySpec.Mode.HYBRID))
 		        .sort(parse(QuerySpec.Sort.class, "sort", sort, QuerySpec.Sort.RELEVANCE))
 		        .collapse(parse(QuerySpec.Collapse.class, "collapse", collapse, QuerySpec.Collapse.NONE))
-		        .types(splitTypes(types)).limit(pageSize(limit, QuerySpec.DEFAULT_LIMIT)).wait(wait);
+		        .types(knownTypes(types)).limit(pageSize(limit, QuerySpec.DEFAULT_LIMIT)).wait(wait);
 		if (offset != null) {
 			if (offset < 0) {
 				throw new BadParameterException("offset must not be negative");
@@ -305,6 +316,37 @@ public class QueryStoreRestController {
 			spec.facet(QuerySpec.Facet.RESOURCE_TYPE);
 		}
 		return new ResponseEntity<Object>(queryStoreService().query(spec.build()).toMap(), HttpStatus.OK);
+	}
+
+	/**
+	 * 404 unless core shows this caller the patient. The lookup goes through core's own patient read,
+	 * so whatever patient-level restriction a deployment applies there applies here too (ADR Decision
+	 * 14 leaves querystore's own checks at the privilege), and a uuid that is no patient's never
+	 * reaches the warm machinery, whose per-patient bookkeeping would otherwise grow with every uuid a
+	 * caller tries. A 404 tells the caller no more than core's {@code GET /patient/{uuid}} does.
+	 */
+	private void requirePatient(String patientUuid) {
+		if (patientService().getPatientByUuid(patientUuid) == null) {
+			throw new PatientNotFoundException();
+		}
+	}
+
+	/**
+	 * The {@code types} parameter, each checked against the registered resource types. An unknown
+	 * name is a 400 rather than a search: the Lucene and MySQL backends create an index or table for
+	 * any well-formed type a search names.
+	 */
+	private List<String> knownTypes(String csv) {
+		List<String> types = splitTypes(csv);
+		if (!types.isEmpty()) {
+			List<String> known = bootstrapService().getResourceTypeNames();
+			for (String type : types) {
+				if (!known.contains(type)) {
+					throw new BadParameterException("Unknown type '" + StringUtils.abbreviate(type, 64) + "'");
+				}
+			}
+		}
+		return types;
 	}
 
 	private static ResponseEntity<Object> statusResponse(IndexStatus status, HttpStatus httpStatus) {
@@ -357,6 +399,18 @@ public class QueryStoreRestController {
 		}
 	}
 
+	/** The patient in the path is not one core shows this caller. */
+	static final class PatientNotFoundException extends RuntimeException {
+
+		private static final long serialVersionUID = 1L;
+	}
+
+	@ExceptionHandler(PatientNotFoundException.class)
+	@ResponseBody
+	public ResponseEntity<Object> handlePatientNotFound(PatientNotFoundException e) {
+		return errorResponse(HttpStatus.NOT_FOUND, "Patient not found");
+	}
+
 	@ExceptionHandler(BadParameterException.class)
 	@ResponseBody
 	public ResponseEntity<Object> handleBadParameter(BadParameterException e) {
@@ -384,6 +438,16 @@ public class QueryStoreRestController {
 	private BootstrapService injectedBootstrapService;
 
 	private QueryStoreService injectedQueryStoreService;
+
+	private PatientService injectedPatientService;
+
+	private PatientService patientService() {
+		return injectedPatientService != null ? injectedPatientService : Context.getPatientService();
+	}
+
+	void setPatientService(PatientService patientService) {
+		this.injectedPatientService = patientService;
+	}
 
 	private BootstrapService bootstrapService() {
 		return injectedBootstrapService != null ? injectedBootstrapService
@@ -447,7 +511,7 @@ public class QueryStoreRestController {
 	@ExceptionHandler(Exception.class)
 	@ResponseBody
 	public ResponseEntity<Object> handleUnexpected(Exception e) {
-		SafeLog.error(log, "Unexpected error handling a querystore REST request", e);
+		SafeLog.error(QueryStoreRestController.class, "Unexpected error handling a querystore REST request", e);
 		return errorResponse(HttpStatus.INTERNAL_SERVER_ERROR, "Internal error");
 	}
 

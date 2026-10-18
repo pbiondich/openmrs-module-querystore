@@ -149,7 +149,7 @@ public abstract class TypeBootstrapper<T> {
 			progressDao.save(progress);
 		}
 		catch (RuntimeException e) {
-			SafeLog.warn(log, "Bootstrap failed for " + getResourceType() + " at cursor "
+			SafeLog.warn(TypeBootstrapper.class, "Bootstrap failed for " + getResourceType() + " at cursor "
 			        + progress.getCursorDateChanged() + "/" + progress.getCursorUuid(), e);
 			progress.setStatus(BootstrapStatus.FAILED);
 			// Include the exception class so a null-message failure (NPE, ISE) is still identifiable
@@ -203,7 +203,7 @@ public abstract class TypeBootstrapper<T> {
 			fast = fetchPage(cursor, cursorUuid, pageSize);
 		}
 		catch (RuntimeException e) {
-			SafeLog.warn(log, "Page fetch failed for " + getResourceType() + " at cursor " + cursor + "/"
+			SafeLog.warn(TypeBootstrapper.class, "Page fetch failed for " + getResourceType() + " at cursor " + cursor + "/"
 			        + SkipLogFormat.loggableUuid(getResourceType(), cursorUuid)
 			        + "; falling back to per-row fetch to skip dump-orphaned record(s)", e);
 			return fetchPageSkippingPoison(cursor, cursorUuid, pageSize, e);
@@ -270,7 +270,7 @@ public abstract class TypeBootstrapper<T> {
 		}
 		catch (RuntimeException e) {
 			// retryable=null → "unknown": a thrown exception, not a DocFailure-bearing WriteResult.
-			SafeLog.warn(log, SkipLogFormat.format("bootstrap", getResourceType(), getUuid(entity),
+			SafeLog.warn(TypeBootstrapper.class, SkipLogFormat.format("bootstrap", getResourceType(), getUuid(entity),
 			        null, e.getMessage()), e);
 			return null;
 		}
