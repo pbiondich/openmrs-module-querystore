@@ -11,6 +11,7 @@ package org.openmrs.module.querystore.web.rest;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -29,6 +30,7 @@ import org.openmrs.module.querystore.api.QueryStoreService;
 import org.openmrs.module.querystore.bootstrap.BootstrapLauncher;
 import org.openmrs.module.querystore.bootstrap.BootstrapService;
 import org.openmrs.module.querystore.bootstrap.BootstrapStatusReport;
+import org.openmrs.module.querystore.model.QueryDocument;
 import org.openmrs.module.webservices.rest.web.RestConstants;
 import org.openmrs.util.PrivilegeConstants;
 import org.slf4j.Logger;
@@ -111,6 +113,67 @@ public class QueryStoreRestController {
 	public ResponseEntity<Object> getDrift() {
 		Context.requirePrivilege(PrivilegeConstants.MANAGE_GLOBAL_PROPERTIES);
 		return new ResponseEntity<Object>(bootstrapService().getDrift().toMap(), HttpStatus.OK);
+	}
+
+	/**
+	 * BENCHMARK ONLY. Not for merge. A thin HTTP wrapper over
+	 * {@link QueryStoreService#searchByPatient(String, String, int)} for a latency benchmark.
+	 *
+	 * <pre>
+	 * GET /ws/rest/v1/querystore/search?patient=&lt;uuid&gt;&amp;q=&lt;text&gt;&amp;limit=50&amp;cold=false
+	 *   -&gt; [{"resourceType":"obs","resourceUuid":"...","date":"2024-01-31","text":"..."}, ...]
+	 * </pre>
+	 *
+	 * <p>{@code limit} defaults to 50 and is clamped to 1..200. The {@code X-Querystore-Millis}
+	 * response header is the wall time in ms of the {@code searchByPatient} call alone, so it excludes
+	 * auth, the cold delete and JSON serialization. With {@code cold=true} (which additionally requires
+	 * {@code Manage Global Properties}) the patient's index documents are deleted first, so the search
+	 * finds none and lazily re-projects the patient: the header then includes that re-projection but
+	 * not the delete.
+	 *
+	 * <p>The cold delete runs outside the per-patient reindex lock, so a concurrent reindex or search
+	 * for the same patient can observe a partial or empty chart. Restore a patient with
+	 * {@code POST /reindex {"patient":"<uuid>"}}.
+	 */
+	@RequestMapping(value = "/search", method = RequestMethod.GET)
+	@ResponseBody
+	public ResponseEntity<Object> search(@RequestParam(value = "patient", required = false) String patient,
+	        @RequestParam(value = "q", required = false) String q,
+	        @RequestParam(value = "limit", defaultValue = "50") int limit,
+	        @RequestParam(value = "cold", defaultValue = "false") boolean cold) {
+		// Up front, before any delete, so an under-privileged caller can never reach the cold path.
+		Context.requirePrivilege(PrivilegeConstants.GET_PATIENTS);
+
+		String patientUuid = StringUtils.trimToNull(patient);
+		String query = StringUtils.trimToNull(q);
+		if (patientUuid == null) {
+			return errorResponse(HttpStatus.BAD_REQUEST, "patient is required");
+		}
+		if (query == null) {
+			return errorResponse(HttpStatus.BAD_REQUEST, "q is required");
+		}
+		int clampedLimit = Math.max(1, Math.min(200, limit));
+
+		QueryStoreService service = queryStoreService();
+		if (cold) {
+			Context.requirePrivilege(PrivilegeConstants.MANAGE_GLOBAL_PROPERTIES);
+			service.bulkDeleteByPatient(patientUuid);
+		}
+
+		long start = System.nanoTime();
+		List<QueryDocument> docs = service.searchByPatient(patientUuid, query, clampedLimit);
+		long millis = (System.nanoTime() - start) / 1_000_000;
+
+		List<Map<String, Object>> results = new ArrayList<Map<String, Object>>(docs.size());
+		for (QueryDocument doc : docs) {
+			Map<String, Object> row = new LinkedHashMap<String, Object>();
+			row.put("resourceType", doc.getResourceType());
+			row.put("resourceUuid", doc.getResourceUuid());
+			row.put("date", doc.getDate() == null ? null : doc.getDate().toString());
+			row.put("text", doc.getText());
+			results.add(row);
+		}
+		return ResponseEntity.ok().header("X-Querystore-Millis", String.valueOf(millis)).<Object> body(results);
 	}
 
 	/**
