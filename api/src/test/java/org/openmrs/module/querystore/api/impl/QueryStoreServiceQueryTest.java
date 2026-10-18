@@ -264,6 +264,61 @@ public class QueryStoreServiceQueryTest {
 		    recent.getGroups().get(0).getConceptUuid());
 	}
 
+	// ---------- lookup order ----------
+
+	@Test
+	public void collapseByConcept_putsTheConceptTheQueryNamesFirst_inBothModes() {
+		// The O3 demo data case: all three match the single token "cd4" with the same BM25 score, and
+		// the order-set obs came first by insertion. "CD4" is a synonym of CD4 count only.
+		index(withNames(doc("obs", "orders-1", "concept-tests-ordered", "Tests ordered: CD4 panel", "2026-03-12"),
+		    "Tests ordered"));
+		index(withNames(obs("pct-1", "concept-cd4-pct", "CD4%: 21.0", 21.0, "2026-03-12"), "CD4%", "CD4 percent"));
+		index(withNames(obs("cd4-1", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-03-12"), "CD4 count", "CD4"));
+
+		for (QuerySpec.Mode mode : QuerySpec.Mode.values()) {
+			List<QueryResult.ConceptGroup> groups = service.query(spec("cd4").mode(mode)
+			        .collapse(QuerySpec.Collapse.CONCEPT).build()).getGroups();
+			assertEquals(mode.name(), CD4, groups.get(0).getConceptUuid());
+		}
+	}
+
+	@Test
+	public void collapseByConcept_matchesANameLessItsUnits_soWeightFindsWeightKg() {
+		// "Review of systems, general: Weight loss" ties "Weight (kg)" on BM25 for "weight".
+		index(withNames(doc("obs", "ros-1", "concept-ros", "Review of systems, general: Weight loss", "2026-03-12"),
+		    "Review of systems, general"));
+		index(withNames(doc("obs", "loss-1", "concept-weight-loss", "Weight loss: Yes", "2026-03-12"), "Weight loss"));
+		index(withNames(obs("wt-1", "concept-weight", "Weight: 61.0 kg", 61.0, "2026-03-12"), "Weight (kg)", "WT"));
+
+		List<QueryResult.ConceptGroup> groups = service.query(spec("weight").mode(QuerySpec.Mode.KEYWORD)
+		        .collapse(QuerySpec.Collapse.CONCEPT).build()).getGroups();
+
+		assertEquals("concept-weight", groups.get(0).getConceptUuid());
+	}
+
+	@Test
+	public void collapseByConcept_breaksAScoreTieTowardANumericValueThenMoreReadings() {
+		// Same text, so the same BM25 score; none is named by the query.
+		index(withNames(doc("obs", "coded-1", "concept-coded", "Malaria smear: positive", "2026-03-12"), "Smear result"));
+		index(withNames(obs("num-1", "concept-num-few", "Malaria smear: 2.0", 2.0, "2026-03-12"), "Smear count"));
+		index(withNames(obs("num-2", "concept-num-many", "Malaria smear: 3.0", 3.0, "2026-03-12"), "Smear density"));
+		index(withNames(obs("num-3", "concept-num-many", "Parasite density: 4.0", 4.0, "2026-02-01"), "Smear density"));
+
+		List<QueryResult.ConceptGroup> groups = service.query(spec("smear").mode(QuerySpec.Mode.KEYWORD)
+		        .collapse(QuerySpec.Collapse.CONCEPT).build()).getGroups();
+
+		assertEquals(Arrays.asList("concept-num-many", "concept-num-few", "concept-coded"),
+		    groups.stream().map(QueryResult.ConceptGroup::getConceptUuid).collect(Collectors.toList()));
+	}
+
+	@Test
+	public void normalizeName_dropsATrailingUnitButKeepsOtherPunctuation() {
+		assertEquals("weight", QueryStoreServiceImpl.normalizeName("Weight (kg)"));
+		assertEquals("cd4%", QueryStoreServiceImpl.normalizeName("CD4%"));
+		assertEquals("blood pressure", QueryStoreServiceImpl.normalizeName("  Blood   Pressure "));
+		assertNull(QueryStoreServiceImpl.normalizeName("(kg)"));
+	}
+
 	// ---------- facets and paging ----------
 
 	@Test
@@ -499,6 +554,13 @@ public class QueryStoreServiceQueryTest {
 			d.putMetadata(FIELD_CONCEPT_NAME, text.substring(0, text.indexOf(':') < 0 ? text.length()
 			        : text.indexOf(':')));
 		}
+		return d;
+	}
+
+	/** Sets the concept's preferred name and synonyms, as the serializers write them. */
+	private static QueryDocument withNames(QueryDocument d, String name, String... synonyms) {
+		d.putMetadata(FIELD_CONCEPT_NAME, name);
+		d.putMetadata(org.openmrs.module.querystore.QueryStoreConstants.FIELD_SYNONYMS, Arrays.asList(synonyms));
 		return d;
 	}
 

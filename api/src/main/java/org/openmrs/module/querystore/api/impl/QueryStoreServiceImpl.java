@@ -18,6 +18,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -486,8 +487,62 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 		}
 		if (spec.getSort() == QuerySpec.Sort.RECENT) {
 			groups.sort((a, b) -> NEWEST_FIRST.compare(a.getLatest(), b.getLatest()));
+		} else if (spec.getQuery() != null) {
+			groups.sort(lookupOrder(spec.getQuery()));
 		}
 		return groups;
+	}
+
+	/**
+	 * Relevance order for concept groups, adjusted for lookup: a concept whose name or a synonym is
+	 * the query itself ("cd4" is a synonym of CD4 count, not of CD4%; "weight" is "Weight (kg)" less
+	 * its units) comes first, then the best member's score. On a tied score, a group with a numeric
+	 * value, then one with more readings. Ties stay in pool order (the sort is stable).
+	 *
+	 * <p>BM25 can't make this distinction: "CD4 count: 350", "CD4%: 21" and "Tests ordered: CD4
+	 * panel" all match the one token "cd4" and score the same, and in hybrid mode CD4% is often the
+	 * nearer vector. Measured on the O3 demo data, see the ADR's consumer-API open question.
+	 */
+	private static Comparator<QueryResult.ConceptGroup> lookupOrder(String query) {
+		String wanted = normalizeName(query);
+		return Comparator
+		        .comparing((QueryResult.ConceptGroup g) -> !namesConcept(g.getLatest().getDocument(), wanted))
+		        .thenComparing(QueryResult.ConceptGroup::getScore, Comparator.nullsLast(Comparator.reverseOrder()))
+		        .thenComparing(g -> g.getLatest().getDocument().getMetadata()
+		                .get(QueryStoreConstants.FIELD_VALUE_NUMERIC) == null)
+		        .thenComparing(QueryResult.ConceptGroup::getCount, Comparator.reverseOrder());
+	}
+
+	/** Whether the document's concept is called {@code wanted}, by its name or a synonym. */
+	private static boolean namesConcept(QueryDocument d, String wanted) {
+		if (wanted == null || conceptUuid(d) == null) {
+			return false;
+		}
+		Object name = d.getMetadata().get(QueryStoreConstants.FIELD_CONCEPT_NAME);
+		if (name instanceof String && wanted.equals(normalizeName((String) name))) {
+			return true;
+		}
+		Object synonyms = d.getMetadata().get(QueryStoreConstants.FIELD_SYNONYMS);
+		if (synonyms instanceof List) {
+			for (Object synonym : (List<?>) synonyms) {
+				if (synonym instanceof String && wanted.equals(normalizeName((String) synonym))) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Lower case, single-spaced, without a trailing parenthesized qualifier: CIEL puts units there
+	 * ("Weight (kg)", "Temperature (c)"). Other punctuation stays, so "CD4%" is not "CD4".
+	 */
+	static String normalizeName(String name) {
+		if (name == null) {
+			return null;
+		}
+		String n = name.toLowerCase(Locale.ROOT).replaceAll("\\s*\\([^()]*\\)\\s*$", "").replaceAll("\\s+", " ").trim();
+		return n.isEmpty() ? null : n;
 	}
 
 	/** The patient's chart (within the spec's types), newest first, indexed by concept. */
