@@ -9,8 +9,13 @@
  */
 package org.openmrs.module.querystore.bootstrap;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
@@ -52,15 +57,74 @@ public class BootstrapLauncher {
 	// threads from piling up parked on those locks and re-scanning an already-complete cursor.
 	private final AtomicBoolean running = new AtomicBoolean(false);
 
-	static final int MAX_CONCURRENT_PATIENT_WARMS = 4;
+	/** Default for {@code querystore.projection.maxConcurrent}. */
+	public static final int DEFAULT_MAX_CONCURRENT_PROJECTIONS = 4;
 
-	// Patients with a launchEnsureIndexedAsync projection in flight: the per-patient in-flight guard,
-	// and the source of the "projecting" index status.
+	// How many failed patients are remembered; the oldest is forgotten past this, and reads as not
+	// indexed again.
+	static final int MAX_FAILED_PATIENTS = 10_000;
+
+	// Every per-patient projection holds one of these while it runs: a background warm, and a
+	// synchronous cold-touch projection on a request thread alike. Daemon spawns a thread per warm and
+	// each projection saturates the CPU's cores through the embedder, so without one bound a burst of
+	// cold patients would run that many at once. Replaced only by setMaxConcurrentProjections, at
+	// module start.
+	private volatile Semaphore projectionSlots = new Semaphore(DEFAULT_MAX_CONCURRENT_PROJECTIONS);
+
+	// Patients with a launchPatientWarm in flight: the per-patient in-flight guard, and the source of
+	// the "projecting" index status.
 	private final Set<String> warmingPatients = ConcurrentHashMap.newKeySet();
 
-	// Patients whose last warm failed: the source of the "failed" index status. Grows by one entry per
-	// failing patient until a warm for it succeeds.
-	private final Set<String> failedPatients = ConcurrentHashMap.newKeySet();
+	// Patients whose last warm failed: the source of the "failed" index status. Bounded, least
+	// recently failed first out, so a caller warming uuids that never index cannot grow it forever.
+	private final Set<String> failedPatients = Collections.synchronizedSet(Collections.newSetFromMap(
+	    new LinkedHashMap<String, Boolean>(16, 0.75f, true) {
+
+		    private static final long serialVersionUID = 1L;
+
+		    @Override
+		    protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+			    return size() > MAX_FAILED_PATIENTS;
+		    }
+	    }));
+
+	/**
+	 * Sets how many per-patient projections may run at once ({@code querystore.projection.maxConcurrent}).
+	 * Called once at module start, before any projection; a later call does not shrink projections
+	 * already holding a slot.
+	 */
+	public void setMaxConcurrentProjections(int max) {
+		this.projectionSlots = new Semaphore(Math.max(1, max));
+	}
+
+	/**
+	 * Runs {@code work} on the calling thread once a projection slot is free, waiting at most
+	 * {@code timeoutMillis} for one. Backs the synchronous cold-touch projection, so it shares the
+	 * bound with background warms.
+	 *
+	 * @return {@code false} when no slot came free in time (or the wait was interrupted), in which
+	 *         case {@code work} did not run
+	 */
+	public boolean runWithProjectionSlot(Runnable work, long timeoutMillis) {
+		Semaphore slots = this.projectionSlots;
+		try {
+			if (!slots.tryAcquire(Math.max(0, timeoutMillis), TimeUnit.MILLISECONDS)) {
+				log.debug("No projection slot came free in time; not projecting");
+				return false;
+			}
+		}
+		catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			return false;
+		}
+		try {
+			work.run();
+			return true;
+		}
+		finally {
+			slots.release();
+		}
+	}
 
 	public void setDaemonToken(DaemonToken token) {
 		this.daemonToken = token;
@@ -165,32 +229,27 @@ public class BootstrapLauncher {
 	 * ({@link #hasFailed}) until a later warm for it succeeds.
 	 *
 	 * <p>Idempotent per patient: a request for a patient already in flight is a no-op that reports
-	 * success. Bounded across patients by {@link #MAX_CONCURRENT_PATIENT_WARMS}: {@link Daemon} spawns a
-	 * thread per call rather than drawing from a pool, so without a cap a burst of chart opens would
-	 * run that many projections (and embedding passes) at once.
+	 * success. Bounded across patients by the projection slots it shares with synchronous projections
+	 * ({@link #runWithProjectionSlot}): with none free it starts nothing.
 	 *
 	 * @return {@code true} once a warm for this patient is in flight (newly launched or already
-	 *         running); {@code false} when no {@link DaemonToken} is wired yet or the concurrency cap is
-	 *         reached, in which case nothing runs and the caller may retry later.
+	 *         running); {@code false} when no {@link DaemonToken} is wired yet or no projection slot is
+	 *         free, in which case nothing runs and the caller may retry later.
 	 */
 	public boolean launchPatientWarm(String patientUuid, Runnable work) {
 		DaemonToken token = this.daemonToken;
 		if (token == null || patientUuid == null) {
 			return false;
 		}
-		if (warmingPatients.contains(patientUuid)) {
-			log.debug("Patient warm already in flight; ignoring duplicate");
-			return true;
-		}
-		// Check-then-add is racy against the cap by at most the number of racing callers, which is an
-		// acceptable overshoot for a soft limit; the per-patient add below is the exact guard.
-		if (warmingPatients.size() >= MAX_CONCURRENT_PATIENT_WARMS) {
-			log.debug("Patient warm cap reached; not launching another");
-			return false;
-		}
 		if (!warmingPatients.add(patientUuid)) {
 			log.debug("Patient warm already in flight; ignoring duplicate");
 			return true;
+		}
+		Semaphore slots = this.projectionSlots;
+		if (!slots.tryAcquire()) {
+			warmingPatients.remove(patientUuid);
+			log.debug("No projection slot free; not launching a warm");
+			return false;
 		}
 		log.debug("Patient warm starting (" + warmingPatients.size() + " in flight)");
 		try {
@@ -206,11 +265,13 @@ public class BootstrapLauncher {
 					log.debug("Background warm failed for patient " + patientUuid);
 				}
 				finally {
+					slots.release();
 					warmingPatients.remove(patientUuid);
 				}
 			}, token);
 		}
 		catch (RuntimeException e) {
+			slots.release();
 			warmingPatients.remove(patientUuid);
 			throw e;
 		}
@@ -228,7 +289,7 @@ public class BootstrapLauncher {
 
 	/**
 	 * True when this patient's last {@link #launchPatientWarm} failed and none has succeeded since.
-	 * Per JVM and not persisted: a restart forgets it.
+	 * Per JVM and not persisted: a restart forgets it, as does the bound on how many are remembered.
 	 */
 	public boolean hasFailed(String patientUuid) {
 		return patientUuid != null && failedPatients.contains(patientUuid);

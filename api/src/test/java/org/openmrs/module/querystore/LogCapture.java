@@ -41,8 +41,8 @@ public final class LogCapture implements AutoCloseable {
 
 	private final AbstractAppender appender;
 
-	private LogCapture(Class<?> type) {
-		this.loggerName = type.getName();
+	private LogCapture(String loggerName) {
+		this.loggerName = loggerName;
 		this.appender = new AbstractAppender("capture-" + loggerName, null, null, true, Property.EMPTY_ARRAY) {
 
 			@Override
@@ -63,7 +63,12 @@ public final class LogCapture implements AutoCloseable {
 	}
 
 	public static LogCapture of(Class<?> type) {
-		return new LogCapture(type);
+		return new LogCapture(type.getName());
+	}
+
+	/** Captures a logger by name, and every logger under it that has no config of its own. */
+	public static LogCapture of(String loggerName) {
+		return new LogCapture(loggerName);
 	}
 
 	/** Every captured line as {@code "LEVEL message"}. */

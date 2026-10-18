@@ -221,4 +221,19 @@ public class QueryStoreActivatorTest {
 		service.index(doc);
 		verify(chosen).upsert(doc);
 	}
+
+	@Test
+	public void configureLimits_appliesTheGlobalProperties_andKeepsDefaultsForBadValues() {
+		when(admin.getGlobalProperty(QueryStoreConstants.GP_PROJECTION_MAX_CONCURRENT)).thenReturn(" 2 ");
+		when(admin.getGlobalProperty(QueryStoreConstants.GP_PROJECTION_SYNC_WAIT_SECONDS)).thenReturn("-5");
+		when(admin.getGlobalProperty(QueryStoreConstants.GP_QUERY_CANDIDATE_POOL)).thenReturn("lots");
+		BootstrapLauncher launcher = mock(BootstrapLauncher.class);
+		QueryStoreServiceImpl service = mock(QueryStoreServiceImpl.class);
+
+		new QueryStoreActivator().configureLimits(admin, launcher, service);
+
+		verify(launcher).setMaxConcurrentProjections(2);
+		verify(service).setSyncProjectionWaitMillis(1000L * QueryStoreServiceImpl.DEFAULT_SYNC_PROJECTION_WAIT_SECONDS);
+		verify(service).setCandidatePool(QueryStoreServiceImpl.DEFAULT_CANDIDATE_POOL);
+	}
 }

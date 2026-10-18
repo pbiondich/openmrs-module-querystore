@@ -228,12 +228,12 @@ public class BootstrapLauncherTest {
 		assertFalse("no token, no warm", launcher.launchPatientWarm("patient-0", () -> { }));
 
 		launcher.setDaemonToken(new DaemonToken("token-warm-cap"));
-		for (int i = 1; i <= BootstrapLauncher.MAX_CONCURRENT_PATIENT_WARMS; i++) {
+		for (int i = 1; i <= BootstrapLauncher.DEFAULT_MAX_CONCURRENT_PROJECTIONS; i++) {
 			assertTrue(launcher.launchPatientWarm("patient-" + i, () -> { }));
 		}
 		assertFalse("one past the cap is refused", launcher.launchPatientWarm("patient-x", () -> { }));
 		assertFalse(launcher.isWarming("patient-x"));
-		assertEquals(BootstrapLauncher.MAX_CONCURRENT_PATIENT_WARMS, launches[0]);
+		assertEquals(BootstrapLauncher.DEFAULT_MAX_CONCURRENT_PROJECTIONS, launches[0]);
 	}
 
 	@Test
@@ -269,5 +269,52 @@ public class BootstrapLauncherTest {
 			assertFalse(log.at("WARN").get(0).contains("patient-uuid-2"));
 			assertTrue(log.at("DEBUG").stream().anyMatch(l -> l.contains("patient-uuid-2")));
 		}
+	}
+
+	@Test
+	public void syncProjections_andBackgroundWarms_shareOneBound() {
+		java.util.List<Runnable> parked = new java.util.ArrayList<>();
+		BootstrapLauncher launcher = SynchronousLaunchers.parked(1, parked);
+		final int[] ran = { 0 };
+
+		assertTrue("the one slot goes to a background warm", launcher.launchPatientWarm("patient-1", () -> { }));
+		assertFalse("a synchronous projection finds no slot in time", launcher.runWithProjectionSlot(() -> ran[0]++, 50));
+		assertFalse("nor does a second warm", launcher.launchPatientWarm("patient-2", () -> { }));
+		assertEquals(0, ran[0]);
+
+		parked.get(0).run();
+		assertTrue("the warm released its slot", launcher.runWithProjectionSlot(() -> ran[0]++, 50));
+		assertEquals(1, ran[0]);
+		assertTrue("and the synchronous projection released it in turn", launcher.launchPatientWarm("patient-2", () -> { }));
+	}
+
+	@Test
+	public void runWithProjectionSlot_releasesTheSlotWhenTheWorkThrows() {
+		java.util.List<Runnable> parked = new java.util.ArrayList<>();
+		BootstrapLauncher launcher = SynchronousLaunchers.parked(1, parked);
+
+		try {
+			launcher.runWithProjectionSlot(() -> {
+				throw new IllegalStateException("projection blew up");
+			}, 50);
+			fail("expected the work's exception");
+		}
+		catch (IllegalStateException expected) {
+			// pass
+		}
+		assertTrue(launcher.launchPatientWarm("patient-1", () -> { }));
+	}
+
+	@Test
+	public void failedPatients_areBounded_oldestForgottenFirst() {
+		BootstrapLauncher launcher = SynchronousLaunchers.create();
+		for (int i = 0; i <= BootstrapLauncher.MAX_FAILED_PATIENTS; i++) {
+			launcher.launchPatientWarm("patient-" + i, () -> {
+				throw new IllegalStateException("x");
+			});
+		}
+
+		assertFalse("the first failure is forgotten past the bound", launcher.hasFailed("patient-0"));
+		assertTrue(launcher.hasFailed("patient-" + BootstrapLauncher.MAX_FAILED_PATIENTS));
 	}
 }

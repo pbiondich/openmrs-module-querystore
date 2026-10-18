@@ -76,4 +76,27 @@
             be triggered programmatically via BootstrapService regardless of this flag.</description>
     </globalProperty>
 
+    <globalProperty>
+        <property>querystore.projection.maxConcurrent</property>
+        <defaultValue>4</defaultValue>
+        <description>How many per-patient projections may run at once: background warms and the
+            synchronous projection a search does on a never-indexed patient share this bound. Each
+            projection keeps the CPU busy embedding, so more than the cores available buys queueing,
+            not throughput. Read at module start.</description>
+    </globalProperty>
+
+    <globalProperty>
+        <property>querystore.projection.syncWaitSeconds</property>
+        <defaultValue>30</defaultValue>
+        <description>How long a search on a never-indexed patient waits for a projection slot before
+            answering with whatever is indexed. Read at module start.</description>
+    </globalProperty>
+
+    <globalProperty>
+        <property>querystore.query.candidatePool</property>
+        <defaultValue>200</defaultValue>
+        <description>How many backend hits the patient query's collapse-by-concept, recency sort and
+            facets run over. Larger is more complete and slower. Read at module start.</description>
+    </globalProperty>
+
 </module>

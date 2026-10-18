@@ -65,6 +65,8 @@ public class QueryStoreActivator extends BaseModuleActivator implements DaemonTo
 		// before the events consumer can dispatch an index. Activator owns the token (via
 		// DaemonTokenAware); the dispatcher is constructed by Spring without it, so propagation lives here.
 		wireSyncDaemonToken();
+		configureLimits(Context.getAdministrationService(), findBootstrapLauncher(),
+		    Context.getRegisteredComponent("queryStoreService", QueryStoreServiceImpl.class));
 		wireBootstrapLauncherToken();
 		warmupQueryEmbedder();
 		if (isAutostartEnabled(Context.getAdministrationService())) {
@@ -175,6 +177,30 @@ public class QueryStoreActivator extends BaseModuleActivator implements DaemonTo
 
 	/** True when the autostart property is set to {@code "true"} (case-insensitive); the GP is
 	 *  registered declaratively in {@code omod/src/main/resources/config.xml}. */
+	/**
+	 * Applies the projection and query limits from their global properties. A value that isn't a
+	 * positive integer keeps the default.
+	 */
+	void configureLimits(AdministrationService admin, BootstrapLauncher launcher, QueryStoreServiceImpl service) {
+		launcher.setMaxConcurrentProjections(positiveInt(admin, QueryStoreConstants.GP_PROJECTION_MAX_CONCURRENT,
+		    BootstrapLauncher.DEFAULT_MAX_CONCURRENT_PROJECTIONS));
+		service.setSyncProjectionWaitMillis(1000L * positiveInt(admin, QueryStoreConstants.GP_PROJECTION_SYNC_WAIT_SECONDS,
+		    QueryStoreServiceImpl.DEFAULT_SYNC_PROJECTION_WAIT_SECONDS));
+		service.setCandidatePool(positiveInt(admin, QueryStoreConstants.GP_QUERY_CANDIDATE_POOL,
+		    QueryStoreServiceImpl.DEFAULT_CANDIDATE_POOL));
+	}
+
+	static int positiveInt(AdministrationService admin, String property, int defaultValue) {
+		String raw = admin.getGlobalProperty(property);
+		try {
+			int value = Integer.parseInt(raw == null ? "" : raw.trim());
+			return value > 0 ? value : defaultValue;
+		}
+		catch (NumberFormatException e) {
+			return defaultValue;
+		}
+	}
+
 	boolean isAutostartEnabled(AdministrationService admin) {
 		return Boolean.TRUE.equals(admin.getGlobalPropertyValue(
 		        QueryStoreConstants.GP_BOOTSTRAP_AUTOSTART, Boolean.FALSE));

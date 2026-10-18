@@ -84,9 +84,31 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 		        }
 	        });
 
+	/** Default for {@code querystore.query.candidatePool}. */
+	public static final int DEFAULT_CANDIDATE_POOL = 200;
+
+	/** Default for {@code querystore.projection.syncWaitSeconds}. */
+	public static final int DEFAULT_SYNC_PROJECTION_WAIT_SECONDS = 30;
+
 	// Candidate pool for query(): its service-layer collapse, recency sort, facets and paging all run
-	// over this many backend hits.
-	static final int CANDIDATE_POOL = 200;
+	// over this many backend hits. Set from querystore.query.candidatePool at module start.
+	private volatile int candidatePool = DEFAULT_CANDIDATE_POOL;
+
+	// How long a synchronous cold-touch projection waits for a projection slot before serving what is
+	// indexed. Set from querystore.projection.syncWaitSeconds at module start.
+	private volatile long syncProjectionWaitMillis = DEFAULT_SYNC_PROJECTION_WAIT_SECONDS * 1000L;
+
+	// [QSEVAL] lines carry clinical text, so they have a logger of their own outside this module's
+	// package: DEBUG on org.openmrs.module.querystore, which troubleshooting turns on, leaves them off.
+	private static final Log qsevalLog = LogFactory.getLog("querystore.qseval");
+
+	public void setCandidatePool(int candidatePool) {
+		this.candidatePool = Math.max(1, candidatePool);
+	}
+
+	public void setSyncProjectionWaitMillis(long millis) {
+		this.syncProjectionWaitMillis = Math.max(0, millis);
+	}
 
 	// Optional: without it, query()/warm() can't start a background projection and getIndexStatus()
 	// never reports PROJECTING. Wired in moduleApplicationContext.xml.
@@ -213,15 +235,15 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 
 	/**
 	 * Retrieval-debug log: one {@code [QSEVAL]} line per hit at DEBUG level so the eval harness
-	 * ({@code /tmp/qs_smoke_eval.py}) can grep its rubric against the actual retrieval order
-	 * when querystore DEBUG is enabled. DEBUG (not INFO) because the line emits patient record
-	 * text — INFO would land PHI in production server logs by default. Operators running an
-	 * eval pass against a deployment enable DEBUG on this package via log4j2 config; production
-	 * pays nothing because the {@link Log#isDebugEnabled()} guard short-circuits before any
-	 * string concatenation.
+	 * ({@code /tmp/qs_smoke_eval.py}) can grep its rubric against the actual retrieval order. DEBUG
+	 * (not INFO) because the line emits patient record text — INFO would land PHI in production
+	 * server logs by default. It has its own logger, {@code querystore.qseval}, outside the module's
+	 * package, so operators running an eval pass enable DEBUG on that logger by name and DEBUG on the
+	 * package does not turn it on; production pays nothing because the
+	 * {@link Log#isDebugEnabled()} guard short-circuits before any string concatenation.
 	 */
 	private void emitRetrievalLog(String query, List<QueryDocument> hits) {
-		if (!log.isDebugEnabled() || hits == null || hits.isEmpty()) {
+		if (!qsevalLog.isDebugEnabled() || hits == null || hits.isEmpty()) {
 			return;
 		}
 		String safeQuery = query == null ? "" : query.replace('\n', ' ').replace('\r', ' ');
@@ -229,7 +251,7 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 			QueryDocument d = hits.get(i);
 			String text = d == null || d.getText() == null
 					? "" : d.getText().replace('\n', ' ').replace('\r', ' ');
-			log.debug("[QSEVAL] q=[" + safeQuery + "] rank=" + (i + 1)
+			qsevalLog.debug("[QSEVAL] q=[" + safeQuery + "] rank=" + (i + 1)
 					+ " type=" + (d == null ? "null" : d.getResourceType())
 					+ " uuid=" + (d == null ? "null" : d.getResourceUuid())
 					+ " text=[" + text + "]");
@@ -244,7 +266,15 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 	 *  and returns whatever the backend has. */
 	private void ensureIndexedSafely(String patientUuid) {
 		try {
-			bootstrapService().ensureIndexed(patientUuid);
+			// Through a projection slot, shared with background warms, so a burst of searches on cold
+			// patients cannot run a projection each at once. With no slot free in time the search
+			// serves what is indexed, as it does when projection fails.
+			if (bootstrapLauncher == null) {
+				bootstrapService().ensureIndexed(patientUuid);
+			} else if (!bootstrapLauncher.runWithProjectionSlot(() -> bootstrapService().ensureIndexed(patientUuid),
+			    syncProjectionWaitMillis)) {
+				log.debug("No projection slot for a cold patient in time; serving search with whatever is indexed");
+			}
 		}
 		catch (RuntimeException e) {
 			// Index-failure must not block search; whatever did get indexed (or what was already
@@ -328,7 +358,7 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 
 	/**
 	 * Prototype: collapse, recency sort, facets and paging all run here, over a candidate pool of the
-	 * top {@link #CANDIDATE_POOL} backend hits (or the whole chart for a recency browse). Each has a
+	 * top {@code querystore.query.candidatePool} backend hits (or the whole chart for a recency browse). Each has a
 	 * backend-native form that would scale better, noted where it happens.
 	 */
 	@Override
@@ -427,8 +457,8 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 		return pool;
 	}
 
-	private static SearchRequest.Builder searchRequest(QuerySpec spec) {
-		return SearchRequest.builder().queryText(spec.getQuery()).limit(CANDIDATE_POOL).resourceTypes(spec.getTypes())
+	private SearchRequest.Builder searchRequest(QuerySpec spec) {
+		return SearchRequest.builder().queryText(spec.getQuery()).limit(candidatePool).resourceTypes(spec.getTypes())
 		        .filter(Filter.patientScope(spec.getPatientUuid()));
 	}
 

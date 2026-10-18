@@ -11,6 +11,7 @@ package org.openmrs.module.querystore.web.rest;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -39,6 +40,7 @@ import org.openmrs.module.querystore.bootstrap.BootstrapLauncher;
 import org.openmrs.module.querystore.bootstrap.BootstrapService;
 import org.openmrs.module.querystore.bootstrap.DriftReport;
 import org.openmrs.module.querystore.model.QueryDocument;
+import org.openmrs.util.PrivilegeConstants;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -587,6 +589,108 @@ public class QueryStoreRestControllerTest {
 		assertEquals("q must be at most 500 characters",
 		    badRequest(() -> controller.search("p", longQuery.toString(), null, null, null, null, null, null, null, true)));
 		org.mockito.Mockito.verifyNoInteractions(queryStore);
+	}
+
+	@Test
+	public void search_searchesOnlyTypesTheCallerCanReadThroughCore() {
+		// Get Patients and Get Observations, but not Get Conditions: an unnamed condition type is left
+		// out of the search, and naming it is a 403.
+		Context.setUserContext(new UserContext(null) {
+
+			@Override
+			public User getAuthenticatedUser() {
+				return new User();
+			}
+
+			@Override
+			public boolean hasPrivilege(String privilege) {
+				return PrivilegeConstants.GET_PATIENTS.equals(privilege) || PrivilegeConstants.GET_OBS.equals(privilege);
+			}
+		});
+		QueryStoreService queryStore = mock(QueryStoreService.class);
+		when(queryStore.query(org.mockito.ArgumentMatchers.any(QuerySpec.class)))
+		        .thenReturn(QueryResult.empty(IndexStatus.INDEXED, QuerySpec.forPatient("p").query("x").build()));
+		controller.setQueryStoreService(queryStore);
+
+		controller.search("patient-uuid", "cd4", null, null, null, null, null, null, null, true);
+		ArgumentCaptor<QuerySpec> captor = ArgumentCaptor.forClass(QuerySpec.class);
+		verify(queryStore).query(captor.capture());
+		assertEquals(Collections.singletonList("obs"), captor.getValue().getTypes());
+
+		try {
+			controller.search("patient-uuid", "cd4", null, "condition", null, null, null, null, null, true);
+			throw new AssertionError("expected a 403 for a type the caller cannot read");
+		}
+		catch (ContextAuthenticationException expected) {
+			assertEquals(HttpStatus.FORBIDDEN, controller.handleAuthFailure(expected).getStatusCode());
+		}
+	}
+
+	@Test
+	public void search_withEveryReadPrivilege_searchesEveryType() {
+		authenticate();
+		QueryStoreService queryStore = mock(QueryStoreService.class);
+		when(queryStore.query(org.mockito.ArgumentMatchers.any(QuerySpec.class)))
+		        .thenReturn(QueryResult.empty(IndexStatus.INDEXED, QuerySpec.forPatient("p").query("x").build()));
+		controller.setQueryStoreService(queryStore);
+
+		controller.search("patient-uuid", "cd4", null, null, null, null, null, null, null, true);
+
+		ArgumentCaptor<QuerySpec> captor = ArgumentCaptor.forClass(QuerySpec.class);
+		verify(queryStore).query(captor.capture());
+		assertEquals("no type list means every type", Collections.emptyList(), captor.getValue().getTypes());
+	}
+
+	@Test
+	public void offsetPastTheCap_andLongEchoes_areBounded() {
+		authenticate();
+		controller.setQueryStoreService(mock(QueryStoreService.class));
+		StringBuilder longMode = new StringBuilder();
+		for (int i = 0; i < 200; i++) {
+			longMode.append('m');
+		}
+
+		assertEquals("offset must be between 0 and 1000",
+		    badRequest(() -> controller.search("p", "cd4", null, null, null, null, null, null, 1001, true)));
+		String error = badRequest(() -> controller.search("p", "cd4", longMode.toString(), null, null, null, null, null,
+		    null, true));
+		assertTrue(error, error.length() < 80);
+	}
+
+	@Test
+	public void aPathValueShapedLikeNoUuid_isA404WithoutAskingCore() {
+		authenticate();
+		PatientService patients = mock(PatientService.class);
+		controller.setPatientService(patients);
+		controller.setQueryStoreService(mock(QueryStoreService.class));
+
+		for (String path : new String[] { "../../etc/passwd", "a b", "0123456789012345678901234567890123456789" }) {
+			try {
+				controller.status(path);
+				throw new AssertionError("expected a 404 for " + path);
+			}
+			catch (QueryStoreRestController.PatientNotFoundException expected) {
+				// pass
+			}
+		}
+		org.mockito.Mockito.verifyNoInteractions(patients);
+	}
+
+	@Test
+	public void warm_thatCannotStart_is503WithRetryAfter() {
+		authenticate();
+		QueryStoreService queryStore = mock(QueryStoreService.class);
+		when(queryStore.warm("patient-uuid")).thenReturn(IndexStatus.NOT_INDEXED);
+		when(queryStore.warm("failed-uuid")).thenReturn(IndexStatus.FAILED);
+		controller.setQueryStoreService(queryStore);
+
+		for (String uuid : new String[] { "patient-uuid", "failed-uuid" }) {
+			ResponseEntity<Object> response = controller.warm(uuid);
+			assertEquals(HttpStatus.SERVICE_UNAVAILABLE, response.getStatusCode());
+			assertEquals(String.valueOf(QueryStoreRestController.WARM_RETRY_AFTER_SECONDS),
+			    response.getHeaders().getFirst("Retry-After"));
+		}
+		assertEquals("failed", ((Map<?, ?>) controller.warm("failed-uuid").getBody()).get("status"));
 	}
 
 	/** Runs a call expected to fail parameter validation and returns the 400 body's error. */

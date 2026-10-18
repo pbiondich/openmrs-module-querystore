@@ -21,6 +21,19 @@ public final class SynchronousLaunchers {
 	private SynchronousLaunchers() {
 	}
 
+	/**
+	 * A real launcher, holding at most {@code slots} projections, whose background warms are parked:
+	 * handed to the executor and never run, so each holds its slot until the test runs it from
+	 * {@code parked}.
+	 */
+	public static BootstrapLauncher parked(int slots, java.util.List<Runnable> parked) {
+		BootstrapLauncher launcher = new BootstrapLauncher();
+		launcher.setMaxConcurrentProjections(slots);
+		launcher.setDaemonExecutor((task, token) -> parked.add(task));
+		launcher.setDaemonToken(new DaemonToken("token-parked"));
+		return launcher;
+	}
+
 	public static BootstrapLauncher create() {
 		BootstrapLauncher launcher = new BootstrapLauncher();
 		launcher.setDaemonExecutor((task, token) -> task.run());

@@ -10,6 +10,7 @@
 package org.openmrs.module.querystore.api.impl;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -451,6 +452,62 @@ public class QueryStoreServiceQueryTest {
 
 		assertEquals(IndexStatus.INDEXED, service.warm(PATIENT));
 		assertTrue(launcher.launched.isEmpty());
+	}
+
+	// ---------- projection bound ----------
+
+	@Test
+	public void coldPatient_withNoProjectionSlotFree_isNotProjectedOnTheRequestThread() {
+		// The one slot is held by a background warm for another patient. A waiting search on a cold
+		// patient must not run a projection of its own past the bound: it gives up after the wait and
+		// serves what is indexed. searchByPatient's cold-touch path is bounded the same way.
+		List<Runnable> parked = new ArrayList<>();
+		BootstrapLauncher launcher = SynchronousLaunchers.parked(1, parked);
+		assertTrue(launcher.launchPatientWarm("another-patient", () -> { }));
+		service.setBootstrapLauncher(launcher);
+		service.setSyncProjectionWaitMillis(20);
+
+		QueryResult waited = service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD).build());
+		service.searchByPatient(PATIENT, "cd4", 5);
+
+		assertTrue("no projection ran past the bound", bootstrap.ensureIndexedCalls.isEmpty());
+		assertEquals(IndexStatus.NOT_INDEXED, waited.getStatus());
+
+		parked.get(0).run();
+		service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD).build());
+		assertEquals("with the slot free, the waiting search projects", Collections.singletonList(PATIENT),
+		    bootstrap.ensureIndexedCalls);
+	}
+
+	@Test
+	public void candidatePool_boundsWhatFacetsCount() {
+		index(obs("obs-1", MALARIA, "Diagnosis: Malaria", null, "2026-01-01"));
+		index(obs("obs-2", MALARIA, "Malaria smear: positive", null, "2026-01-03"));
+		index(doc("condition", "cond-1", MALARIA, "Condition: Malaria, active", "2026-01-02"));
+		service.setCandidatePool(1);
+
+		QueryResult result = service.query(spec("malaria").mode(QuerySpec.Mode.KEYWORD)
+		        .facet(QuerySpec.Facet.RESOURCE_TYPE).build());
+
+		assertEquals(1, result.getResourceTypeCounts().values().stream().mapToInt(Integer::intValue).sum());
+	}
+
+	// ---------- [QSEVAL] logging ----------
+
+	@Test
+	public void qsevalLines_haveTheirOwnLogger_soPackageDebugDoesNotEmitThem() {
+		index(obs("cd4-1", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-03-12"));
+
+		try (org.openmrs.module.querystore.LogCapture pkg = org.openmrs.module.querystore.LogCapture
+		        .of("org.openmrs.module.querystore")) {
+			service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD).build());
+			assertFalse(pkg.lines().stream().anyMatch(l -> l.contains("[QSEVAL]")));
+		}
+		try (org.openmrs.module.querystore.LogCapture qseval = org.openmrs.module.querystore.LogCapture
+		        .of("querystore.qseval")) {
+			service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD).build());
+			assertTrue("DEBUG on the qseval logger emits them", qseval.lines().stream().anyMatch(l -> l.contains("[QSEVAL]")));
+		}
 	}
 
 	// ---------- failed warms ----------
