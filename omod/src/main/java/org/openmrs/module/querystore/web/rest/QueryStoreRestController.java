@@ -68,6 +68,7 @@ import org.springframework.web.bind.annotation.ResponseBody;
  *
  * POST /ws/rest/v1/querystore/patient/{uuid}/warm     -&gt; 202 {"status": "projecting"}
  * GET  /ws/rest/v1/querystore/patient/{uuid}/status   -&gt; {"status": "indexed"}
+ *   (status is one of indexed, projecting, failed, not_indexed; a uuid that is no live patient's is a 404)
  * GET  /ws/rest/v1/querystore/patient/{uuid}/recent?limit=5&amp;types=obs
  * GET  /ws/rest/v1/querystore/patient/{uuid}/search?q=cd4&amp;mode=keyword&amp;collapse=concept&amp;limit=5&amp;wait=false
  * </pre>
@@ -232,10 +233,11 @@ public class QueryStoreRestController {
 	static final int MAX_QUERY_LENGTH = 500;
 
 	/**
-	 * Starts projecting a never-indexed patient in the background and returns at once with
-	 * {@code 202 {"status": "projecting" | "not_indexed"}}, or {@code 200 {"status": "indexed"}} when
-	 * there was nothing to do. Idempotent: an indexed or already-projecting patient starts nothing. {@code not_indexed} means no warm could start (the
-	 * daemon isn't up, or the concurrent-warm cap is reached); the caller may retry.
+	 * Starts projecting a never-indexed patient in the background, or retries one whose last warm
+	 * failed, and returns at once: {@code 200 {"status": "indexed"}} when there was nothing to do, else
+	 * {@code 202} with {@code projecting} (started, or already running), or {@code not_indexed} or
+	 * {@code failed} when no warm could start (the daemon isn't up, or the concurrent-warm cap is
+	 * reached) and the caller may retry.
 	 */
 	@RequestMapping(value = "/patient/{patientUuid}/warm", method = RequestMethod.POST)
 	@ResponseBody
@@ -246,7 +248,7 @@ public class QueryStoreRestController {
 		return statusResponse(status, status == IndexStatus.INDEXED ? HttpStatus.OK : HttpStatus.ACCEPTED);
 	}
 
-	/** {@code {"status": "indexed" | "projecting" | "not_indexed"}}. */
+	/** {@code {"status": "indexed" | "projecting" | "failed" | "not_indexed"}}. */
 	@RequestMapping(value = "/patient/{patientUuid}/status", method = RequestMethod.GET)
 	@ResponseBody
 	public ResponseEntity<Object> status(@PathVariable("patientUuid") String patientUuid) {
@@ -257,7 +259,9 @@ public class QueryStoreRestController {
 
 	/**
 	 * The patient's newest documents: {@code {"status", "hits": [...]}}. Doesn't block on a cold
-	 * patient unless {@code wait=true}; it warms one and answers {@code projecting} with no hits.
+	 * patient unless {@code wait=true}: a never-indexed one is warmed and answered {@code projecting}
+	 * with no hits, and one whose last warm failed is answered {@code failed} with no hits and not
+	 * retried (that takes a {@code POST warm}).
 	 */
 	@RequestMapping(value = "/patient/{patientUuid}/recent", method = RequestMethod.GET)
 	@ResponseBody
