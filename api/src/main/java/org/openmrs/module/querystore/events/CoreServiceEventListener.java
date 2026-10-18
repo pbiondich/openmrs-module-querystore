@@ -9,9 +9,13 @@
  */
 package org.openmrs.module.querystore.events;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.openmrs.BaseOpenmrsData;
+import org.openmrs.Obs;
 import org.openmrs.Person;
 import org.openmrs.aop.event.PurgeServiceEvent;
 import org.openmrs.aop.event.RetireServiceEvent;
@@ -22,7 +26,9 @@ import org.openmrs.aop.event.VoidServiceEvent;
 import org.openmrs.api.context.Context;
 import org.openmrs.person.PersonMergeLog;
 import org.openmrs.module.querystore.bootstrap.BootstrapService;
+import org.openmrs.module.querystore.model.QueryDocument;
 import org.openmrs.module.querystore.sync.AfterCommitDispatcher;
+import org.openmrs.module.querystore.sync.ObsVersions;
 import org.openmrs.module.querystore.sync.RecordIndexer;
 import org.openmrs.module.querystore.sync.RecordProjector;
 import org.openmrs.module.querystore.serialization.ClinicalRecordSerializer;
@@ -108,6 +114,10 @@ public class CoreServiceEventListener {
 			return;
 		}
 		try {
+			if (!purge && data instanceof Obs) {
+				reconcileObs(serializer, data);
+				return;
+			}
 			RecordProjector.project(serializer, data, purge, indexer(), dispatcher());
 		}
 		catch (RuntimeException e) {
@@ -154,6 +164,45 @@ public class CoreServiceEventListener {
 		});
 	}
 
+	/**
+	 * Obs are projected from committed state, not from the event's snapshot. Core never edits an obs
+	 * in place: {@code saveObs} on a changed, persisted obs clones it through the DAO (new uuid,
+	 * {@code previous_version} set) and then voids the original through the proxy. The one
+	 * {@code SaveServiceEvent} carries the original before any of that runs, and nothing names the
+	 * new obs. Indexing the snapshot left either the voided original or nothing, depending on whether
+	 * its index or its void's delete finished last on the sync pool (ADR: Sync reliability and
+	 * reconciliation, "Obs edits").
+	 *
+	 * <p>So the event only records which obs it touched (the tree, while the session is open); after
+	 * commit each is re-read and indexed if live, or deleted and replaced by its live successors if
+	 * voided. A new obs, a void, an unvoid and an edit all take this path, and every task for an obs
+	 * converges on the same committed answer whichever finishes last.
+	 */
+	@SuppressWarnings({ "unchecked", "rawtypes" })
+	void reconcileObs(ClinicalRecordSerializer<BaseOpenmrsData> serializer, BaseOpenmrsData root) {
+		List<String> uuids = new ArrayList<>();
+		for (BaseOpenmrsData node : serializer.collectTree(root)) {
+			uuids.add(node.getUuid());
+		}
+		ClinicalRecordSerializer<Obs> obsSerializer = (ClinicalRecordSerializer) serializer;
+		dispatcher().dispatch(() -> {
+			for (String uuid : uuids) {
+				try {
+					ObsVersions.Resolution resolution = obsVersions().resolve(uuid, obsSerializer);
+					for (String gone : resolution.getToDelete()) {
+						indexer().delete("obs", gone);
+					}
+					for (QueryDocument doc : resolution.getToIndex()) {
+						indexer().index(doc);
+					}
+				}
+				catch (RuntimeException e) {
+					log.warn("Skipping reconcile for obs/" + uuid + " due to failure", e);
+				}
+			}
+		});
+	}
+
 	SerializerRegistry registry() {
 		return Context.getRegisteredComponent("querystore.serializerRegistry", SerializerRegistry.class);
 	}
@@ -164,6 +213,10 @@ public class CoreServiceEventListener {
 
 	RecordIndexer indexer() {
 		return Context.getRegisteredComponent("querystore.sync.indexer", RecordIndexer.class);
+	}
+
+	ObsVersions obsVersions() {
+		return Context.getRegisteredComponent("querystore.sync.obsVersions", ObsVersions.class);
 	}
 
 	AfterCommitDispatcher dispatcher() {
