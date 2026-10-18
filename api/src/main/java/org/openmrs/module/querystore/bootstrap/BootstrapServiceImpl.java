@@ -62,10 +62,24 @@ public class BootstrapServiceImpl extends BaseOpenmrsService implements Bootstra
 
 	// Per-patient lock so concurrent ensureIndexed(uuid) calls for the same patient serialize. The
 	// cross-JVM race is absorbed by the Decision 3 version invariant (conditional upsert on
-	// last_modified); this lock prevents redundant projection work within one JVM. Map grows by one
-	// entry per ever-touched patient and is bounded in practice by deployment patient count — see
-	// the ADR "Lazy per-patient projection" sub-question for the trade-off discussion.
-	private final Map<String, Object> patientLocks = new ConcurrentHashMap<>();
+	// last_modified); this lock prevents redundant projection work within one JVM. Striped, not one
+	// lock per patient: a map of locks grew by one entry per uuid any caller tried and was never
+	// evicted. Two patients share a stripe about one time in PATIENT_LOCK_STRIPES and then project
+	// one after the other, which costs time, not correctness.
+	static final int PATIENT_LOCK_STRIPES = 256;
+
+	private final Object[] patientLockStripes = new Object[PATIENT_LOCK_STRIPES];
+
+	{
+		for (int i = 0; i < PATIENT_LOCK_STRIPES; i++) {
+			patientLockStripes[i] = new Object();
+		}
+	}
+
+	/** The lock a patient's projections serialize on; the same object for the same uuid. */
+	Object patientLock(String patientUuid) {
+		return patientLockStripes[Math.floorMod(patientUuid.hashCode(), PATIENT_LOCK_STRIPES)];
+	}
 
 	private BootstrapProgressDao progressDao;
 
@@ -158,11 +172,15 @@ public class BootstrapServiceImpl extends BaseOpenmrsService implements Bootstra
 
 	@Override
 	public void ensureIndexed(String patientUuid) {
+		projectIfNotIndexed(patientUuid);
+	}
+
+	@Override
+	public boolean projectIfNotIndexed(String patientUuid) {
 		if (patientUuid == null || patientUuid.isEmpty()) {
-			return;
+			return false;
 		}
-		Object lock = patientLocks.computeIfAbsent(patientUuid, k -> new Object());
-		synchronized (lock) {
+		synchronized (patientLock(patientUuid)) {
 			// Re-probe inside the lock: callers (QueryStoreServiceImpl.searchByPatient /
 			// getPatientChart) test existsByPatient BEFORE entering this method, so two concurrent
 			// cold-touches on the same never-indexed patient both see false and both invoke
@@ -174,9 +192,10 @@ public class BootstrapServiceImpl extends BaseOpenmrsService implements Bootstra
 			// invariant 2), so the cost of this guard is negligible compared to even one
 			// re-projection avoided.
 			if (backendSelector != null && backendSelector.getStore().existsByPatient(patientUuid)) {
-				return;
+				return false;
 			}
-			projectAllTypesForPatient(patientUuid);
+			throwIfAnyFailed(projectAllTypesForPatient(patientUuid));
+			return true;
 		}
 	}
 
@@ -185,8 +204,7 @@ public class BootstrapServiceImpl extends BaseOpenmrsService implements Bootstra
 		if (patientUuid == null || patientUuid.isEmpty()) {
 			return;
 		}
-		Object lock = patientLocks.computeIfAbsent(patientUuid, k -> new Object());
-		synchronized (lock) {
+		synchronized (patientLock(patientUuid)) {
 			// Force a full re-projection (repairs a partially-indexed patient, which ensureIndexed's
 			// existsByPatient gate refuses to touch). Delete FIRST: this clears stale rows AND means
 			// the projection isn't gated by existing docs. Order is load-bearing — projecting before
@@ -196,14 +214,22 @@ public class BootstrapServiceImpl extends BaseOpenmrsService implements Bootstra
 			// elsewhere in this class): a null here is a wiring fault that must fail loudly, not
 			// silently skip the delete and leave stale docs alongside the re-projected ones.
 			queryStoreService.bulkDeleteByPatient(patientUuid);
-			projectAllTypesForPatient(patientUuid);
+			throwIfAnyFailed(projectAllTypesForPatient(patientUuid));
+		}
+	}
+
+	private static void throwIfAnyFailed(List<String> failedTypes) {
+		if (!failedTypes.isEmpty()) {
+			throw new PartialProjectionException(failedTypes);
 		}
 	}
 
 	/** The per-type per-patient projection loop shared by {@link #ensureIndexed} and
 	 *  {@link #reindexPatient}. Per-type and per-record failures are isolated and logged so one
-	 *  type's failure doesn't abort the rest. Caller holds the per-patient lock. */
-	private void projectAllTypesForPatient(String patientUuid) {
+	 *  type's failure doesn't abort the rest. Caller holds the per-patient lock.
+	 *  @return the types that failed, so the caller can report an incomplete chart */
+	private List<String> projectAllTypesForPatient(String patientUuid) {
+		List<String> failedTypes = new ArrayList<>();
 		Map<String, ResourceTypeProvider> providers = discoverProviders();
 		for (String resourceType : allResourceTypes(providers)) {
 			try {
@@ -223,8 +249,10 @@ public class BootstrapServiceImpl extends BaseOpenmrsService implements Bootstra
 				SafeLog.warn(BootstrapServiceImpl.class, "Per-patient projection of " + resourceType
 				        + " failed; continuing with remaining types (patient uuid at DEBUG)", e);
 				log.debug("Per-patient projection of " + resourceType + " failed for patient " + patientUuid);
+				failedTypes.add(resourceType);
 			}
 		}
+		return failedTypes;
 	}
 
 	@Override

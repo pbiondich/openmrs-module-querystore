@@ -150,11 +150,14 @@ public abstract class TypeBootstrapper<T> {
 		}
 		catch (RuntimeException e) {
 			SafeLog.warn(TypeBootstrapper.class, "Bootstrap failed for " + getResourceType() + " at cursor "
-			        + progress.getCursorDateChanged() + "/" + progress.getCursorUuid(), e);
+			        + progress.getCursorDateChanged() + "/"
+			        + SkipLogFormat.loggableUuid(getResourceType(), progress.getCursorUuid()), e);
 			progress.setStatus(BootstrapStatus.FAILED);
 			// Include the exception class so a null-message failure (NPE, ISE) is still identifiable
 			// from the persisted row alone; getMessage() can be null and would store as "null".
-			progress.setFailureMessage(e.getClass().getSimpleName() + ": " + e.getMessage());
+			// Scrubbed: the row is served by GET /querystore/indexingstatus, and a message can quote a
+			// patient's uuid.
+			progress.setFailureMessage(e.getClass().getSimpleName() + ": " + SkipLogFormat.scrubUuids(e.getMessage()));
 			progressDao.save(progress);
 			throw e;
 		}

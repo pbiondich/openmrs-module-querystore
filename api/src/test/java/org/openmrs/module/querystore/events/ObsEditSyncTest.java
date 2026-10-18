@@ -15,6 +15,7 @@ import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 
@@ -23,8 +24,11 @@ import org.junit.Test;
 import org.openmrs.Encounter;
 import org.openmrs.Obs;
 import org.openmrs.api.context.Context;
+import org.openmrs.module.querystore.LogCapture;
 import org.openmrs.module.querystore.QueryStoreConstants;
 import org.openmrs.module.querystore.model.QueryDocument;
+import org.openmrs.module.querystore.sync.ObsVersions;
+import org.openmrs.module.querystore.serialization.ObsRecordSerializer;
 import org.openmrs.test.BaseModuleContextSensitiveTest;
 
 /**
@@ -109,6 +113,42 @@ public class ObsEditSyncTest extends BaseModuleContextSensitiveTest {
 
 		assertTrue(listener.service.indexed.isEmpty());
 		assertTrue(deletedUuids().contains(obs.getUuid()));
+	}
+
+	@Test
+	public void aChainOfEdits_resolvesToTheLiveObs_andOneLongerThanTheCap_isTruncatedVisibly() {
+		ObsVersions versions = Context.getRegisteredComponent("querystore.sync.obsVersions", ObsVersions.class);
+		ObsRecordSerializer serializer = new ObsRecordSerializer();
+
+		Obs short1 = Context.getObsService().saveObs(weight(60.0, null), null);
+		String shortOriginal = short1.getUuid();
+		Obs current = short1;
+		for (int i = 1; i <= 3; i++) {
+			current.setValueNumeric(60.0 + i);
+			current = Context.getObsService().saveObs(current, "edit " + i);
+		}
+		Context.flushSession();
+		ObsVersions.Resolution within = versions.resolve(shortOriginal, serializer);
+		assertEquals(Collections.singletonList(shortOriginal), within.getToDelete());
+		assertEquals(1, within.getToIndex().size());
+		assertEquals(current.getUuid(), within.getToIndex().get(0).getResourceUuid());
+
+		Obs long1 = Context.getObsService().saveObs(weight(70.0, null), null);
+		String longOriginal = long1.getUuid();
+		current = long1;
+		for (int i = 1; i <= ObsVersions.MAX_CHAIN + 5; i++) {
+			current.setValueNumeric(70.0 + i);
+			current = Context.getObsService().saveObs(current, "edit " + i);
+		}
+		Context.flushSession();
+		try (LogCapture log = LogCapture.of(ObsVersions.class)) {
+			ObsVersions.Resolution past = versions.resolve(longOriginal, serializer);
+
+			assertEquals("the original still goes", Collections.singletonList(longOriginal), past.getToDelete());
+			assertTrue("the live obs past the cap is not reached", past.getToIndex().isEmpty());
+			assertEquals("and the truncation is logged, without the uuid", 1, log.at("WARN").size());
+			assertFalse(log.at("WARN").get(0).contains(longOriginal));
+		}
 	}
 
 	private void assertReplaced(String originalUuid, String replacementUuid, double newValue) {

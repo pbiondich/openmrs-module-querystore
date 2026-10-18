@@ -199,4 +199,16 @@ public interface QueryStoreService extends OpenmrsService {
 	default IndexStatus warm(String patientUuid) {
 		throw new UnsupportedOperationException("warm is not implemented by " + getClass().getName());
 	}
+
+	/**
+	 * Deletes the patient's documents and re-projects every type, under the per-patient lock and
+	 * inside a projection slot: the bounded form of {@code BootstrapService.reindexPatient}, for a
+	 * request thread. Returns the patient's status after it ran ({@link IndexStatus#INDEXED}, or
+	 * {@link IndexStatus#FAILED} when a type failed), or {@link IndexStatus#NOT_INDEXED} when no slot
+	 * came free within {@code querystore.projection.syncWaitSeconds} and nothing ran.
+	 */
+	@Authorized(PrivilegeConstants.MANAGE_GLOBAL_PROPERTIES)
+	default IndexStatus reindex(String patientUuid) {
+		throw new UnsupportedOperationException("reindex is not implemented by " + getClass().getName());
+	}
 }

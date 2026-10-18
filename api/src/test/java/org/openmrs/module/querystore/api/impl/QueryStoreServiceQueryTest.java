@@ -478,7 +478,7 @@ public class QueryStoreServiceQueryTest {
 		// serves what is indexed. searchByPatient's cold-touch path is bounded the same way.
 		List<Runnable> parked = new ArrayList<>();
 		BootstrapLauncher launcher = SynchronousLaunchers.parked(1, parked);
-		assertTrue(launcher.launchPatientWarm("another-patient", () -> { }));
+		assertTrue(launcher.launchPatientWarm("another-patient", () -> true));
 		service.setBootstrapLauncher(launcher);
 		service.setSyncProjectionWaitMillis(20);
 
@@ -601,6 +601,51 @@ public class QueryStoreServiceQueryTest {
 		assertEquals(Collections.singletonList(PATIENT), bootstrap.reindexCalls);
 		assertEquals(IndexStatus.INDEXED, service.getIndexStatus(PATIENT));
 		assertEquals(1, service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD).wait(false).build()).getHits().size());
+	}
+
+	@Test
+	public void aFailedPatient_getsNoHits_evenWhenTheSearchWaits() {
+		service.setBootstrapLauncher(SynchronousLaunchers.create());
+		bootstrap.onEnsureIndexed = uuid -> {
+			index(obs("cd4-1", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-03-12"));
+			throw new org.openmrs.module.querystore.bootstrap.PartialProjectionException(Collections.singletonList("allergy"));
+		};
+		service.warm(PATIENT);
+		assertEquals(IndexStatus.FAILED, service.getIndexStatus(PATIENT));
+		int projections = bootstrap.ensureIndexedCalls.size();
+
+		QueryResult waited = service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD).wait(true).build());
+
+		assertEquals(IndexStatus.FAILED, waited.getStatus());
+		assertTrue("a partial chart is not served", waited.getHits().isEmpty());
+		assertEquals("and not re-projected by the search", projections, bootstrap.ensureIndexedCalls.size());
+	}
+
+	@Test
+	public void reindex_reprojectsInASlot_andClearsAFailure() {
+		service.setBootstrapLauncher(SynchronousLaunchers.create());
+		bootstrap.onEnsureIndexed = uuid -> {
+			throw new IllegalStateException("projection blew up");
+		};
+		service.warm(PATIENT);
+		assertEquals(IndexStatus.FAILED, service.getIndexStatus(PATIENT));
+
+		bootstrap.onEnsureIndexed = uuid -> index(obs("cd4-1", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-03-12"));
+		assertEquals(IndexStatus.INDEXED, service.reindex(PATIENT));
+		assertEquals(IndexStatus.INDEXED, service.getIndexStatus(PATIENT));
+		assertEquals(1, service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD).build()).getHits().size());
+	}
+
+	@Test
+	public void reindex_withNoSlotFree_reportsNotIndexed_andRunsNothing() {
+		List<Runnable> parked = new ArrayList<>();
+		BootstrapLauncher launcher = SynchronousLaunchers.parked(1, parked);
+		assertTrue(launcher.launchPatientWarm("another-patient", () -> true));
+		service.setBootstrapLauncher(launcher);
+		service.setSyncProjectionWaitMillis(20);
+
+		assertEquals(IndexStatus.NOT_INDEXED, service.reindex(PATIENT));
+		assertTrue(bootstrap.reindexCalls.isEmpty());
 	}
 
 	@Test
@@ -738,7 +783,7 @@ public class QueryStoreServiceQueryTest {
 		boolean warming;
 
 		@Override
-		public boolean launchPatientWarm(String patientUuid, Runnable work) {
+		public boolean launchPatientWarm(String patientUuid, java.util.function.BooleanSupplier work) {
 			if (!accept) {
 				return false;
 			}

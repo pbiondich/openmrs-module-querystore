@@ -15,11 +15,11 @@ import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.spi.ExtendedLogger;
 
 /**
- * Logs a failure at WARN or ERROR without the exception's stack or any uuid in its messages: an
+ * Logs a failure at WARN or ERROR without the exception's stack, any uuid or any line break: an
  * exception message can quote anything (a Hibernate "No row with the given identifier exists", a
  * backend error echoing a document), and WARN and ERROR reach production logs by default. The line
- * carries the exception types and their uuid-scrubbed messages; the full throwable goes to DEBUG,
- * like the [QSEVAL] lines.
+ * carries the caller's message and the exception types and messages, all uuid-scrubbed; the full
+ * throwable and the message as written go to DEBUG, like the [QSEVAL] lines.
  *
  * <p>Logs to the owner class's logger, the same one its {@code log} field uses, and names this class
  * as the logging boundary so the line's location is the caller's, not this class's (OpenMRS's log
@@ -44,15 +44,23 @@ public final class SafeLog {
 	}
 
 	private static void log(Class<?> owner, Level level, String message, Throwable t) {
+		// The caller's message is scrubbed as the exception's is: a uuid concatenated into it reaches
+		// WARN as surely as one in a cause, and a newline in it could forge a second log entry. The
+		// DEBUG line keeps the message as written, with the full throwable.
+		String line = scrub(message) + describe(t);
 		Logger logger = LogManager.getLogger(owner);
 		if (logger instanceof ExtendedLogger) {
 			ExtendedLogger extended = (ExtendedLogger) logger;
-			extended.logIfEnabled(FQCN, level, null, message + describe(t), (Throwable) null);
+			extended.logIfEnabled(FQCN, level, null, line, (Throwable) null);
 			extended.logIfEnabled(FQCN, Level.DEBUG, null, message, t);
 		} else {
-			logger.log(level, message + describe(t));
+			logger.log(level, line);
 			logger.debug(message, t);
 		}
+	}
+
+	private static String scrub(String text) {
+		return text == null ? "" : SkipLogFormat.scrubUuids(text).replace('\n', ' ').replace('\r', ' ');
 	}
 
 	/** {@code " [Type: message; caused by Type: message]"}, uuids scrubbed; empty for no throwable. */
@@ -68,7 +76,7 @@ public final class SafeLog {
 			}
 			sb.append(c.getClass().getName());
 			if (c.getMessage() != null) {
-				sb.append(": ").append(SkipLogFormat.scrubUuids(c.getMessage()).replace('\n', ' ').replace('\r', ' '));
+				sb.append(": ").append(scrub(c.getMessage()));
 			}
 		}
 		return sb.append(" (stack at DEBUG)]").toString();

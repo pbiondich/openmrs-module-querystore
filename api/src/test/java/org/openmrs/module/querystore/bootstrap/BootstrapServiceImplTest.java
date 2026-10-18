@@ -641,11 +641,34 @@ public class BootstrapServiceImplTest {
 		EmptyPageBootstrapper ok = new EmptyPageBootstrapper("encounter");
 		service.setBootstrappers(Arrays.asList(failing, ok));
 
-		service.ensureIndexed("patient-uuid");
+		try {
+			service.ensureIndexed("patient-uuid");
+			fail("an incomplete chart must be reported");
+		}
+		catch (PartialProjectionException expected) {
+			assertEquals(Collections.singletonList("obs"), expected.getFailedTypes());
+		}
 
 		assertEquals(1, failing.fetchForPatientCount);
 		assertEquals("non-failing type still ran after the failure",
 		        1, ok.fetchForPatientCount);
+	}
+
+	@Test
+	public void ensureIndexed_withEveryTypeProjected_throwsNothing() {
+		service.setBootstrappers(Arrays.asList(new EmptyPageBootstrapper("obs"), new EmptyPageBootstrapper("encounter")));
+
+		service.ensureIndexed("patient-uuid");
+	}
+
+	@Test
+	public void patientLocks_areBounded_andStableForAUuid() {
+		java.util.Set<Object> locks = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+		for (int i = 0; i < 10_000; i++) {
+			locks.add(service.patientLock("uuid-" + i));
+		}
+		assertTrue("10,000 uuids share at most the fixed stripes", locks.size() <= BootstrapServiceImpl.PATIENT_LOCK_STRIPES);
+		assertTrue(service.patientLock("uuid-7") == service.patientLock("uuid-7"));
 	}
 
 	@Test
@@ -808,7 +831,13 @@ public class BootstrapServiceImplTest {
 		EmptyPageBootstrapper ok = new EmptyPageBootstrapper("encounter");
 		service.setBootstrappers(Arrays.asList(failing, ok));
 
-		service.reindexPatient("patient-uuid");
+		try {
+			service.reindexPatient("patient-uuid");
+			fail("an incomplete chart must be reported");
+		}
+		catch (PartialProjectionException expected) {
+			assertEquals(Collections.singletonList("obs"), expected.getFailedTypes());
+		}
 
 		assertEquals(1, qs.bulkDeleteCount);
 		assertEquals("a per-type projection failure must not abort the rest", 1, ok.fetchForPatientCount);

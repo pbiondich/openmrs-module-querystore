@@ -17,6 +17,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.hibernate.Session;
 import org.openmrs.Obs;
 import org.openmrs.api.db.hibernate.DbSessionFactory;
@@ -35,7 +37,9 @@ import org.openmrs.module.querystore.serialization.ClinicalRecordSerializer;
 public class ObsVersions {
 
 	// A previous_version chain longer than this is an anomaly, not a run of edits in one commit.
-	private static final int MAX_CHAIN = 20;
+	public static final int MAX_CHAIN = 20;
+
+	private static final Log log = LogFactory.getLog(ObsVersions.class);
 
 	private final DbSessionFactory sessionFactory;
 
@@ -75,13 +79,13 @@ public class ObsVersions {
 		        .uniqueResult();
 		if (obs == null) {
 			toDelete.add(uuid);
-		} else if (!obs.getVoided()) {
+		} else if (!Boolean.TRUE.equals(obs.getVoided())) {
 			addIfSerialized(serializer.serialize(obs), toIndex);
 		} else {
 			toDelete.add(uuid);
 			for (Obs successor : liveSuccessors(obs)) {
 				for (Obs node : serializer.collectTree(successor)) {
-					if (!node.getVoided()) {
+					if (!Boolean.TRUE.equals(node.getVoided())) {
 						addIfSerialized(serializer.serialize(node), toIndex);
 					}
 				}
@@ -90,21 +94,32 @@ public class ObsVersions {
 		return new Resolution(toIndex, toDelete);
 	}
 
-	/** The live obs that replaced this one, following previous_version past any voided in between. */
+	/**
+	 * The live obs that replaced this one, following previous_version past any voided in between. Walks
+	 * at most {@link #MAX_CHAIN} obs; past that it stops, logs, and returns what it found, so the
+	 * caller still deletes the original and a live successor further on stays unindexed until it is
+	 * next saved.
+	 */
 	List<Obs> liveSuccessors(Obs original) {
 		List<Obs> live = new ArrayList<>();
 		Set<Integer> seen = new HashSet<>();
 		Deque<Obs> frontier = new ArrayDeque<>();
 		frontier.add(original);
-		int steps = 0;
-		while (!frontier.isEmpty() && steps++ < MAX_CHAIN) {
+		int walked = 0;
+		while (!frontier.isEmpty()) {
 			Obs node = frontier.poll();
 			if (!seen.add(node.getObsId())) {
 				continue;
 			}
+			if (walked++ == MAX_CHAIN) {
+				log.warn("Obs previous_version chain is longer than " + MAX_CHAIN
+				        + "; live successors past it are not indexed (obs uuid at DEBUG)");
+				log.debug("Obs previous_version chain truncated from obs/" + original.getUuid());
+				break;
+			}
 			for (Obs next : session().createQuery("from Obs o where o.previousVersion = :prev", Obs.class)
 			        .setParameter("prev", node).list()) {
-				if (next.getVoided()) {
+				if (Boolean.TRUE.equals(next.getVoided())) {
 					frontier.add(next);
 				} else {
 					live.add(next);

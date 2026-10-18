@@ -67,4 +67,18 @@ public class SafeLogTest {
 		assertEquals("", SafeLog.describe(null));
 		assertEquals(" [java.lang.RuntimeException (stack at DEBUG)]", SafeLog.describe(new RuntimeException()));
 	}
+
+	@Test
+	public void theCallersMessage_isScrubbedOfUuidsAndLineBreaks_atWarn_andKeptAsWrittenAtDebug() {
+		try (LogCapture capture = LogCapture.of(SafeLogTest.class)) {
+			SafeLog.warn(SafeLogTest.class, "Bootstrap failed at cursor " + PATIENT + "\nFORGED ENTRY", new RuntimeException("x"));
+
+			String warn = capture.at("WARN").get(0);
+			assertFalse(warn, warn.contains(PATIENT));
+			assertFalse("one line, no forged second entry", warn.contains("\n"));
+			assertTrue(warn, warn.startsWith("Bootstrap failed at cursor <uuid> FORGED ENTRY ["));
+			assertTrue("DEBUG keeps the message as written",
+			    capture.at("DEBUG").get(0).startsWith("Bootstrap failed at cursor " + PATIENT));
+		}
+	}
 }

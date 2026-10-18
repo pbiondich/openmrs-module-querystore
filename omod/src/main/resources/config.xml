@@ -82,7 +82,7 @@
         <description>How many per-patient projections may run at once: background warms and the
             synchronous projection a search does on a never-indexed patient share this bound. Each
             projection keeps the CPU busy embedding, so more than the cores available buys queueing,
-            not throughput. Read at module start.</description>
+            not throughput. 1 to 32; another value is logged and the default used. Read at module start.</description>
     </globalProperty>
 
     <globalProperty>
@@ -91,15 +91,16 @@
         <description>How long a search on a never-indexed patient waits for a projection slot before
             answering with whatever is indexed. The waiting request holds its server thread, so a
             burst of cold-patient searches parks up to this many seconds per surplus request; longer
-            waits find a slot more often, shorter ones free threads sooner. Read at module start.</description>
+            waits find a slot more often, shorter ones free threads sooner. 0 to 30; another value is
+            logged and the default used. Read at module start.</description>
     </globalProperty>
 
     <globalProperty>
         <property>querystore.query.candidatePool</property>
         <defaultValue>200</defaultValue>
         <description>How many backend hits the patient query's collapse-by-concept, recency sort and
-            facets run over. Larger is more complete and slower; values above 1000 are treated as 1000.
-            Read at module start.</description>
+            facets run over. Larger is more complete and slower. 1 to 1000; another value is logged and
+            the default used. Read at module start.</description>
     </globalProperty>
 
 </module>
