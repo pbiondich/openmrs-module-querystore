@@ -495,6 +495,50 @@ public class QueryStoreServiceQueryTest {
 	}
 
 	@Test
+	public void aSynchronousProjection_readsAsProjecting_untilItFinishes() throws Exception {
+		// The projection writes its first type, then stalls: the chart exists but is half written. A
+		// concurrent status read and a non-waiting search must say projecting, not indexed, and the
+		// search must not start a second projection.
+		service.setBootstrapLauncher(SynchronousLaunchers.create());
+		java.util.concurrent.CountDownLatch written = new java.util.concurrent.CountDownLatch(1);
+		java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+		bootstrap.onEnsureIndexed = uuid -> {
+			index(obs("cd4-1", CD4, "CD4 count: 350.0 cells/µL", 350.0, "2026-03-12"));
+			written.countDown();
+			try {
+				release.await(10, java.util.concurrent.TimeUnit.SECONDS);
+			}
+			catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		};
+		Thread search = new Thread(() -> service.searchByPatient(PATIENT, "cd4", 5));
+		search.start();
+		assertTrue("the projection reached its half-written point", written.await(10, java.util.concurrent.TimeUnit.SECONDS));
+
+		assertEquals(IndexStatus.PROJECTING, service.getIndexStatus(PATIENT));
+		QueryResult concurrent = service.query(spec("cd4").mode(QuerySpec.Mode.KEYWORD).wait(false).build());
+		assertEquals(IndexStatus.PROJECTING, concurrent.getStatus());
+		assertTrue("no partial answer while projecting", concurrent.getHits().isEmpty());
+
+		release.countDown();
+		search.join(10_000);
+		assertEquals(IndexStatus.INDEXED, service.getIndexStatus(PATIENT));
+		assertEquals("one projection, not a second from the concurrent search", 1, bootstrap.ensureIndexedCalls.size());
+	}
+
+	@Test
+	public void candidatePool_isClampedTo1000() {
+		service.setCandidatePool(1_000_000);
+		for (int i = 0; i < 3; i++) {
+			index(obs("g-" + i, "concept-glucose", "Glucose: 5." + i + " mmol/L", 5.0 + i, "2026-01-0" + (i + 1)));
+		}
+		// Clamped, not refused: a pool of 1000 still finds all three.
+		assertEquals(3, service.query(spec("glucose").mode(QuerySpec.Mode.KEYWORD).build()).getHits().size());
+		assertEquals(QueryStoreServiceImpl.MAX_CANDIDATE_POOL, service.candidatePool());
+	}
+
+	@Test
 	public void candidatePool_boundsWhatFacetsCount() {
 		index(obs("obs-1", MALARIA, "Diagnosis: Malaria", null, "2026-01-01"));
 		index(obs("obs-2", MALARIA, "Malaria smear: positive", null, "2026-01-03"));

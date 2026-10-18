@@ -71,8 +71,8 @@ public class BootstrapLauncher {
 	// module start.
 	private volatile Semaphore projectionSlots = new Semaphore(DEFAULT_MAX_CONCURRENT_PROJECTIONS);
 
-	// Patients with a launchPatientWarm in flight: the per-patient in-flight guard, and the source of
-	// the "projecting" index status.
+	// Patients with a projection in flight (a background warm, or a synchronous one holding a slot):
+	// the per-patient in-flight guard, and the source of the "projecting" index status.
 	private final Set<String> warmingPatients = ConcurrentHashMap.newKeySet();
 
 	// Patients whose last warm failed: the source of the "failed" index status. Bounded, least
@@ -98,14 +98,17 @@ public class BootstrapLauncher {
 	}
 
 	/**
-	 * Runs {@code work} on the calling thread once a projection slot is free, waiting at most
-	 * {@code timeoutMillis} for one. Backs the synchronous cold-touch projection, so it shares the
-	 * bound with background warms.
+	 * Runs one patient's projection ({@code work}) on the calling thread once a projection slot is
+	 * free, waiting at most {@code timeoutMillis} for one. Backs the synchronous cold-touch projection,
+	 * so it shares the bound with background warms. While it runs the patient reads as warming, as
+	 * for a background warm: the chart is half written until it finishes, and a concurrent status
+	 * read or non-waiting search must not take it as indexed. If a background warm for the patient is
+	 * already registered, that entry stands and this one adds none.
 	 *
 	 * @return {@code false} when no slot came free in time (or the wait was interrupted), in which
 	 *         case {@code work} did not run
 	 */
-	public boolean runWithProjectionSlot(Runnable work, long timeoutMillis) {
+	public boolean runWithProjectionSlot(String patientUuid, Runnable work, long timeoutMillis) {
 		Semaphore slots = this.projectionSlots;
 		try {
 			if (!slots.tryAcquire(Math.max(0, timeoutMillis), TimeUnit.MILLISECONDS)) {
@@ -117,11 +120,15 @@ public class BootstrapLauncher {
 			Thread.currentThread().interrupt();
 			return false;
 		}
+		boolean registered = patientUuid != null && warmingPatients.add(patientUuid);
 		try {
 			work.run();
 			return true;
 		}
 		finally {
+			if (registered) {
+				warmingPatients.remove(patientUuid);
+			}
 			slots.release();
 		}
 	}
@@ -282,9 +289,8 @@ public class BootstrapLauncher {
 	}
 
 	/**
-	 * True while a {@link #launchPatientWarm} for this patient is running. Does not see a synchronous
-	 * cold-touch projection (a {@code searchByPatient} on a never-indexed patient), which runs on the
-	 * request thread.
+	 * True while a projection for this patient is running: a {@link #launchPatientWarm}, or a
+	 * synchronous one through {@link #runWithProjectionSlot}.
 	 */
 	public boolean isWarming(String patientUuid) {
 		return patientUuid != null && warmingPatients.contains(patientUuid);

@@ -281,12 +281,12 @@ public class BootstrapLauncherTest {
 		final int[] ran = { 0 };
 
 		assertTrue("the one slot goes to a background warm", launcher.launchPatientWarm("patient-1", () -> { }));
-		assertFalse("a synchronous projection finds no slot in time", launcher.runWithProjectionSlot(() -> ran[0]++, 50));
+		assertFalse("a synchronous projection finds no slot in time", launcher.runWithProjectionSlot("patient-sync", () -> ran[0]++, 50));
 		assertFalse("nor does a second warm", launcher.launchPatientWarm("patient-2", () -> { }));
 		assertEquals(0, ran[0]);
 
 		parked.get(0).run();
-		assertTrue("the warm released its slot", launcher.runWithProjectionSlot(() -> ran[0]++, 50));
+		assertTrue("the warm released its slot", launcher.runWithProjectionSlot("patient-sync", () -> ran[0]++, 50));
 		assertEquals(1, ran[0]);
 		assertTrue("and the synchronous projection released it in turn", launcher.launchPatientWarm("patient-2", () -> { }));
 	}
@@ -297,7 +297,7 @@ public class BootstrapLauncherTest {
 		BootstrapLauncher launcher = SynchronousLaunchers.parked(1, parked);
 
 		try {
-			launcher.runWithProjectionSlot(() -> {
+			launcher.runWithProjectionSlot("patient-sync", () -> {
 				throw new IllegalStateException("projection blew up");
 			}, 50);
 			fail("expected the work's exception");

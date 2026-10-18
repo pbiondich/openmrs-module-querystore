@@ -98,7 +98,8 @@
         <property>querystore.query.candidatePool</property>
         <defaultValue>200</defaultValue>
         <description>How many backend hits the patient query's collapse-by-concept, recency sort and
-            facets run over. Larger is more complete and slower. Read at module start.</description>
+            facets run over. Larger is more complete and slower; values above 1000 are treated as 1000.
+            Read at module start.</description>
     </globalProperty>
 
 </module>

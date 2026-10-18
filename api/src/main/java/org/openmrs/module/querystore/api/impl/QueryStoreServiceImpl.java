@@ -87,6 +87,9 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 	/** Default for {@code querystore.query.candidatePool}. */
 	public static final int DEFAULT_CANDIDATE_POOL = 200;
 
+	/** Largest candidate pool accepted, whatever the global property says: each request holds it in memory. */
+	public static final int MAX_CANDIDATE_POOL = 1000;
+
 	/** Default for {@code querystore.projection.syncWaitSeconds}. */
 	public static final int DEFAULT_SYNC_PROJECTION_WAIT_SECONDS = 10;
 
@@ -102,8 +105,12 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 	// package: DEBUG on org.openmrs.module.querystore, which troubleshooting turns on, leaves them off.
 	private static final Log qsevalLog = LogFactory.getLog("querystore.qseval");
 
+	int candidatePool() {
+		return candidatePool;
+	}
+
 	public void setCandidatePool(int candidatePool) {
-		this.candidatePool = Math.max(1, candidatePool);
+		this.candidatePool = Math.max(1, Math.min(MAX_CANDIDATE_POOL, candidatePool));
 	}
 
 	public void setSyncProjectionWaitMillis(long millis) {
@@ -271,8 +278,8 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 			// serves what is indexed, as it does when projection fails.
 			if (bootstrapLauncher == null) {
 				bootstrapService().ensureIndexed(patientUuid);
-			} else if (!bootstrapLauncher.runWithProjectionSlot(() -> bootstrapService().ensureIndexed(patientUuid),
-			    syncProjectionWaitMillis)) {
+			} else if (!bootstrapLauncher.runWithProjectionSlot(patientUuid,
+			    () -> bootstrapService().ensureIndexed(patientUuid), syncProjectionWaitMillis)) {
 				log.debug("No projection slot for a cold patient in time; serving search with whatever is indexed");
 			}
 		}
