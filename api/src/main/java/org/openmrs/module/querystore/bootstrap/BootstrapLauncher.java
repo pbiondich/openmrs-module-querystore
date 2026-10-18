@@ -241,15 +241,18 @@ public class BootstrapLauncher {
 		if (token == null || patientUuid == null) {
 			return false;
 		}
-		if (!warmingPatients.add(patientUuid)) {
-			log.debug("Patient warm already in flight; ignoring duplicate");
-			return true;
-		}
+		// Slot first, then the in-flight entry, so a patient is only ever in warmingPatients while its
+		// warm holds a slot: registering first let a racing duplicate report "in flight" for a warm
+		// that then found no slot and never ran.
 		Semaphore slots = this.projectionSlots;
 		if (!slots.tryAcquire()) {
-			warmingPatients.remove(patientUuid);
 			log.debug("No projection slot free; not launching a warm");
-			return false;
+			return warmingPatients.contains(patientUuid);
+		}
+		if (!warmingPatients.add(patientUuid)) {
+			slots.release();
+			log.debug("Patient warm already in flight; ignoring duplicate");
+			return true;
 		}
 		log.debug("Patient warm starting (" + warmingPatients.size() + " in flight)");
 		try {

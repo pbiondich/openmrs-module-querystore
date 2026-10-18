@@ -232,6 +232,8 @@ public class BootstrapLauncherTest {
 			assertTrue(launcher.launchPatientWarm("patient-" + i, () -> { }));
 		}
 		assertFalse("one past the cap is refused", launcher.launchPatientWarm("patient-x", () -> { }));
+		assertTrue("with every slot busy, a repeat for a patient whose warm holds one is still in flight",
+		    launcher.launchPatientWarm("patient-1", () -> { }));
 		assertFalse(launcher.isWarming("patient-x"));
 		assertEquals(BootstrapLauncher.DEFAULT_MAX_CONCURRENT_PROJECTIONS, launches[0]);
 	}
