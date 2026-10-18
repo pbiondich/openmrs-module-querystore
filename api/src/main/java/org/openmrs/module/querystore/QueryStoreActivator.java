@@ -9,6 +9,7 @@
  */
 package org.openmrs.module.querystore;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.openmrs.api.AdministrationService;
@@ -176,27 +177,36 @@ public class QueryStoreActivator extends BaseModuleActivator implements DaemonTo
 	}
 
 	/**
-	 * Applies the projection and query limits from their global properties. A value that isn't a
-	 * positive integer keeps the default.
+	 * Applies the projection and query limits from their global properties. A value that is unset
+	 * keeps the default; one that isn't an integer within its range keeps the default too, and is
+	 * logged, so a mistyped limit is visible rather than silently ignored.
 	 */
 	void configureLimits(AdministrationService admin, BootstrapLauncher launcher, QueryStoreServiceImpl service) {
-		launcher.setMaxConcurrentProjections(positiveInt(admin, QueryStoreConstants.GP_PROJECTION_MAX_CONCURRENT,
-		    BootstrapLauncher.DEFAULT_MAX_CONCURRENT_PROJECTIONS));
-		service.setSyncProjectionWaitMillis(1000L * positiveInt(admin, QueryStoreConstants.GP_PROJECTION_SYNC_WAIT_SECONDS,
-		    QueryStoreServiceImpl.DEFAULT_SYNC_PROJECTION_WAIT_SECONDS));
-		service.setCandidatePool(positiveInt(admin, QueryStoreConstants.GP_QUERY_CANDIDATE_POOL,
-		    QueryStoreServiceImpl.DEFAULT_CANDIDATE_POOL));
+		launcher.setMaxConcurrentProjections(boundedInt(admin, QueryStoreConstants.GP_PROJECTION_MAX_CONCURRENT,
+		    BootstrapLauncher.DEFAULT_MAX_CONCURRENT_PROJECTIONS, 1, BootstrapLauncher.MAX_PROJECTION_SLOTS));
+		service.setSyncProjectionWaitMillis(1000L * boundedInt(admin, QueryStoreConstants.GP_PROJECTION_SYNC_WAIT_SECONDS,
+		    QueryStoreServiceImpl.DEFAULT_SYNC_PROJECTION_WAIT_SECONDS, 0, QueryStoreServiceImpl.MAX_SYNC_PROJECTION_WAIT_SECONDS));
+		service.setCandidatePool(boundedInt(admin, QueryStoreConstants.GP_QUERY_CANDIDATE_POOL,
+		    QueryStoreServiceImpl.DEFAULT_CANDIDATE_POOL, 1, QueryStoreServiceImpl.MAX_CANDIDATE_POOL));
 	}
 
-	static int positiveInt(AdministrationService admin, String property, int defaultValue) {
+	static int boundedInt(AdministrationService admin, String property, int defaultValue, int min, int max) {
 		String raw = admin.getGlobalProperty(property);
-		try {
-			int value = Integer.parseInt(raw == null ? "" : raw.trim());
-			return value > 0 ? value : defaultValue;
-		}
-		catch (NumberFormatException e) {
+		if (raw == null || raw.trim().isEmpty()) {
 			return defaultValue;
 		}
+		try {
+			int value = Integer.parseInt(raw.trim());
+			if (value >= min && value <= max) {
+				return value;
+			}
+		}
+		catch (NumberFormatException e) {
+			// falls through to the warning
+		}
+		log.warn("Ignoring " + property + " = '" + StringUtils.abbreviate(raw.trim(), 40) + "': expected an integer from "
+		        + min + " to " + max + "; using " + defaultValue);
+		return defaultValue;
 	}
 
 	/** True when the autostart property is set to {@code "true"} (case-insensitive); the GP is

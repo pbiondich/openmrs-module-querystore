@@ -66,14 +66,28 @@ public interface BootstrapService extends OpenmrsService {
 	 * <p>Idempotent: repeated calls write the same documents and rely on the Decision 3
 	 * version-protection invariant for races with concurrent steady-state writes. Concurrent calls
 	 * for the same patient serialize on a per-patient lock; concurrent calls for different patients
-	 * run in parallel. Per-record and per-type failures are isolated and logged; the method returns
-	 * after attempting every type.
+	 * run in parallel. Per-record and per-type failures are isolated and logged; after attempting
+	 * every type, a type that failed is reported by throwing {@link PartialProjectionException}, so a
+	 * caller does not take an incomplete chart as indexed.
 	 *
 	 * <p>Persists no progress row — the per-patient cursor lives only for the call. A bootstrapper
 	 * that declares no per-patient story (the {@link TypeBootstrapper#fetchPageForPatient} default
 	 * throws) is skipped at debug-log level instead of failing the whole call.
 	 */
 	void ensureIndexed(String patientUuid);
+
+	/**
+	 * {@link #ensureIndexed}, reporting whether it projected: {@code false} when the patient already
+	 * had a document, so nothing ran. A projection that ran over a patient with nothing indexed is a
+	 * full one, which a caller can take as clearing an earlier failure; a skipped one is not.
+	 *
+	 * <p>A {@code default} so test doubles keep compiling; it cannot tell a skip from a projection
+	 * and reports {@code true}. The production implementation overrides it.
+	 */
+	default boolean projectIfNotIndexed(String patientUuid) {
+		ensureIndexed(patientUuid);
+		return true;
+	}
 
 	/**
 	 * Forces a full re-projection of one patient: deletes the patient's existing read-store
@@ -87,7 +101,8 @@ public interface BootstrapService extends OpenmrsService {
 	 * <p>Delete and re-projection run under the same per-patient lock as {@code ensureIndexed}, so
 	 * a concurrent cold-touch projection cannot interleave with the delete and leave the patient
 	 * under-indexed. No-op for a null/blank uuid. Per-record and per-type failures are isolated and
-	 * logged, matching {@code ensureIndexed}.
+	 * logged, and a failed type is reported by throwing {@link PartialProjectionException}, matching
+	 * {@code ensureIndexed}.
 	 */
 	void reindexPatient(String patientUuid);
 

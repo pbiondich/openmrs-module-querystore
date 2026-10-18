@@ -22,6 +22,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.BooleanSupplier;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.logging.Log;
@@ -93,6 +94,9 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 	/** Default for {@code querystore.projection.syncWaitSeconds}. */
 	public static final int DEFAULT_SYNC_PROJECTION_WAIT_SECONDS = 10;
 
+	/** Longest synchronous wait honoured: the waiting request holds its server thread. */
+	public static final int MAX_SYNC_PROJECTION_WAIT_SECONDS = 30;
+
 	// Candidate pool for query(): its service-layer collapse, recency sort, facets and paging all run
 	// over this many backend hits. Set from querystore.query.candidatePool at module start.
 	private volatile int candidatePool = DEFAULT_CANDIDATE_POOL;
@@ -114,7 +118,7 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 	}
 
 	public void setSyncProjectionWaitMillis(long millis) {
-		this.syncProjectionWaitMillis = Math.max(0, millis);
+		this.syncProjectionWaitMillis = Math.max(0, Math.min(MAX_SYNC_PROJECTION_WAIT_SECONDS * 1000L, millis));
 	}
 
 	// Optional: without it, query()/warm() can't start a background projection and getIndexStatus()
@@ -279,7 +283,7 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 			if (bootstrapLauncher == null) {
 				bootstrapService().ensureIndexed(patientUuid);
 			} else if (!bootstrapLauncher.runWithProjectionSlot(patientUuid,
-			    () -> bootstrapService().ensureIndexed(patientUuid), syncProjectionWaitMillis)) {
+			    () -> bootstrapService().projectIfNotIndexed(patientUuid), syncProjectionWaitMillis)) {
 				log.debug("No projection slot for a cold patient in time; serving search with whatever is indexed");
 			}
 		}
@@ -337,6 +341,33 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 		return backend.existsByPatient(patientUuid) ? IndexStatus.INDEXED : IndexStatus.NOT_INDEXED;
 	}
 
+	/**
+	 * Deletes and re-projects the patient under its per-patient lock, inside a projection slot, waiting
+	 * (bounded) for one and for any projection of the patient already in flight. A full re-projection,
+	 * so success clears a recorded failure.
+	 */
+	@Override
+	public IndexStatus reindex(String patientUuid) {
+		if (backend == null || patientUuid == null) {
+			return IndexStatus.NOT_INDEXED;
+		}
+		BooleanSupplier work = () -> {
+			bootstrapService().reindexPatient(patientUuid);
+			return true;
+		};
+		try {
+			boolean ran = bootstrapLauncher != null
+			        ? bootstrapLauncher.runExclusiveProjection(patientUuid, work, syncProjectionWaitMillis)
+			        : work.getAsBoolean();
+			return ran ? getIndexStatus(patientUuid) : IndexStatus.NOT_INDEXED;
+		}
+		catch (RuntimeException e) {
+			SafeLog.warn(QueryStoreServiceImpl.class, "Patient reindex failed (patient uuid at DEBUG)", e);
+			log.debug("Patient reindex failed for " + patientUuid);
+			return IndexStatus.FAILED;
+		}
+	}
+
 	@Override
 	public IndexStatus warm(String patientUuid) {
 		IndexStatus status = getIndexStatus(patientUuid);
@@ -347,17 +378,20 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 		// A retry re-projects in full: the failed warm may have left a partial chart, which
 		// ensureIndexed would take as indexed and skip.
 		boolean retry = status == IndexStatus.FAILED;
-		Runnable work = () -> {
+		BooleanSupplier work = () -> {
+			boolean full;
 			if (retry) {
 				bootstrapService().reindexPatient(patientUuid);
+				full = true;
 			} else {
-				bootstrapService().ensureIndexed(patientUuid);
+				full = bootstrapService().projectIfNotIndexed(patientUuid);
 			}
 			// A live patient always projects at least its patient document, so nothing indexed means
 			// the projection failed (or the uuid is no live patient's).
 			if (!backend.existsByPatient(patientUuid)) {
 				throw new IllegalStateException("Warm finished with nothing indexed");
 			}
+			return full;
 		};
 		return bootstrapLauncher != null && bootstrapLauncher.launchPatientWarm(patientUuid, work)
 		        ? IndexStatus.PROJECTING : status;
@@ -378,16 +412,22 @@ public class QueryStoreServiceImpl extends BaseOpenmrsService implements QuerySt
 		String patientUuid = spec.getPatientUuid();
 		IndexStatus status = getIndexStatus(patientUuid);
 		if (status != IndexStatus.INDEXED) {
-			if (!spec.isWait()) {
-				// A partly-projected chart answers "no CD4" for a patient whose obs haven't landed
-				// yet, so a projecting patient gets nothing rather than a misleading partial answer.
-				// A failed one isn't retried here: that would re-run a failing projection on every
-				// keystroke. An explicit warm retries it.
-				return QueryResult.empty(status == IndexStatus.FAILED ? status : warm(patientUuid), spec);
+			// A partly-projected chart answers "no CD4" for a patient whose obs haven't landed yet,
+			// so a patient that is projecting, failed or not indexed gets no hits, only its status. A
+			// failed one isn't retried here, waiting or not: that would re-run a failing projection
+			// on every keystroke, and its chart may be partial. An explicit warm or reindex retries it.
+			if (status == IndexStatus.FAILED) {
+				return QueryResult.empty(status, spec);
 			}
-			// Blocks on the per-patient lock while a background warm finishes, then short-circuits.
+			if (!spec.isWait()) {
+				return QueryResult.empty(warm(patientUuid), spec);
+			}
+			// Waits (bounded) for a projection of its own, or for the one already in flight.
 			ensureIndexedSafely(patientUuid);
 			status = getIndexStatus(patientUuid);
+			if (status != IndexStatus.INDEXED) {
+				return QueryResult.empty(status, spec);
+			}
 		}
 
 		List<QueryResult.Hit> pool = candidates(spec);
